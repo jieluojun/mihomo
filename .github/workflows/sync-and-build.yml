@@ -63,7 +63,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+
 
       - name: Sanity test
         run: go test ./adapter/outbound/ -run TestHttpConnectLine -v
