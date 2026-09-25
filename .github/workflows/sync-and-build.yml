@@ -81,21 +81,45 @@ jobs:
           # 压缩方式与上游一致:gzip,归档名带版本号后缀
           gzip -c mihomo-linux-arm64      > "mihomo-linux-arm64-${VERSION}.gz"
           gzip -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+          # Mihomo's external-panel core updater reads this file, then fetches
+          # the matching architecture-specific .gz asset from the same release.
+          echo "$VERSION" > version.txt
 
       - name: Clean stale assets from rolling release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 资产名含 commit 号,上游更新后名字会变;发布前清掉旧资产,
-          # 保证 with-at-latest 里永远只有当前版本的两个 .gz。
-          # 用 REST API 直删,每次删除打印 HTTP 状态(204=成功),便于排查。
-          set -x
-          ids=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+          # 保证 with-at-latest 里永远只有当前版本的两个 .gz 和 version.txt。
+          # 不开 shell xtrace,避免把 Authorization header 写入日志。
+          set -euo pipefail
+          release_json="$(mktemp)"
+          trap 'rm -f "$release_json"' EXIT
+          status="$(curl -sS -o "$release_json" -w "%{http_code}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/with-at-latest" \
-            | jq -r '.assets[].id') || ids=""
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/with-at-latest")"
+          echo "release lookup -> HTTP $status"
+          if [[ "$status" == "404" ]]; then
+            echo "rolling release does not exist yet; nothing to clean"
+            exit 0
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "release lookup failed (HTTP $status)" >&2
+            cat "$release_json" >&2
+            exit 1
+          fi
+          ids="$(jq -r '.assets[]?.id' "$release_json")"
           for id in $ids; do
-            curl -s -o /dev/null -w "delete asset id=$id -> HTTP %{http_code}\n" -X DELETE \
+            status="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$id"
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$id")"
+            echo "delete asset id=$id -> HTTP $status"
+            if [[ "$status" != "204" ]]; then
+              echo "failed to delete release asset $id (HTTP $status)" >&2
+              exit 1
+            fi
           done
 
       - name: Publish rolling release
@@ -107,4 +131,5 @@ jobs:
           files: |
             mihomo-linux-arm64-*.gz
             mihomo-android-arm64-v8-*.gz
+            version.txt
           make_latest: true
