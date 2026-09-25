@@ -1,7 +1,12 @@
 # 放到 fork 仓库 with-at 分支的 .github/workflows/sync-and-build.yml
 # 功能:同步上游 -> rebase With-At 补丁 -> 编译 eBPF 版 -> 发布滚动 Release
-# 前提:仓库 Settings -> Actions -> General -> Workflow permissions 设为
-#       "Read and write permissions"
+# 前提:1) 仓库 Settings -> Actions -> General -> Workflow permissions 设为
+#          "Read and write permissions"
+#       2) 注意 GitHub 的默认分支限制:schedule 定时触发和 Actions 页面的
+#          "Run workflow" 按钮只对本工作流文件存在于【默认分支】时生效。
+#          建议把 fork 默认分支切换为 with-at(Settings -> General ->
+#          Default branch);否则只能用 gh CLI / API 指定 --ref with-at
+#          手动触发(命令见 fork-sync/SYNC.md)。
 
 name: sync-upstream-and-build
 
@@ -61,9 +66,9 @@ jobs:
           BUILDTIME="$(date -u)"
           LD="-X \"github.com/metacubex/mihomo/constant.Version=$VERSION\" -X \"github.com/metacubex/mihomo/constant.BuildTime=$BUILDTIME\" -w -s -buildid="
           mkdir -p bin
-          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-linux-arm64-ebpf .
-          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-android-arm64-ebpf .
-          ./bin/mihomo-linux-arm64-ebpf -v || true # arm64 产物,宿主机无法执行,忽略
+          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-linux-arm64 .
+          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-android-arm64 .
+          ./bin/mihomo-linux-arm64 -v || true # arm64 产物,宿主机无法执行,忽略
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
@@ -75,6 +80,6 @@ jobs:
             版本号 `alpha-smart-<commit>-with-at`,含 `with_gvisor` + `with_ebpf`。
             同步提交:${{ github.sha }}
           files: |
-            bin/mihomo-linux-arm64-ebpf
-            bin/mihomo-android-arm64-ebpf
+            bin/mihomo-linux-arm64
+            bin/mihomo-android-arm64
           make_latest: true
