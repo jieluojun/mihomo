@@ -1,0 +1,141 @@
+# 放到 fork 仓库 with-at 分支的 .github/workflows/sync-and-build.yml
+# 功能:同步上游 -> rebase With-At 补丁 -> 编译 eBPF 版 -> 发布滚动 Release
+#
+# 设计说明:GitHub 的 schedule 定时触发和 Actions 页面的 "Run workflow" 按钮
+# 只对【默认分支】上存在的工作流文件生效。本工作流每次运行时会把自己复制一份
+# 到 Alpha 分支(上游代码 + 本文件),所以默认分支保持 Alpha 即可,
+# 无需切换默认分支(切换在部分 fork 上会报 "Could not change default branch")。
+#
+# 产物命名与压缩方式和上游 build.yml 一致:
+#   mihomo-linux-arm64-<VERSION>.gz / mihomo-android-arm64-v8-<VERSION>.gz
+#
+# 前提:仓库 Settings -> Actions -> General -> Workflow permissions 设为
+#       "Read and write permissions";首次触发方式见 fork-sync/SYNC.md。
+
+name: sync-upstream-and-build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *" # 每天 20:00 UTC = 北京时间 04:00
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: https://github.com/liuran001/mihomo.git
+  UPSTREAM_BRANCH: Alpha
+  PATCH_BRANCH: with-at
+  WORKFLOW_PATH: .github/workflows/sync-and-build.yml
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch branch
+        uses: actions/checkout@v4
+        with:
+          ref: with-at
+          fetch-depth: 0
+
+      - name: Sync upstream, keep workflow on Alpha, rebase patches
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM" || true
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+          # 1) Alpha = 上游最新代码 + 本工作流文件的一份拷贝
+          #    (保证默认分支上始终有本工作流,定时触发和按钮持续可用)
+          git checkout -B "$UPSTREAM_BRANCH" "upstream/$UPSTREAM_BRANCH"
+          git checkout "$PATCH_BRANCH" -- "$WORKFLOW_PATH"
+          git add "$WORKFLOW_PATH"
+          git diff --cached --quiet || git commit -m "ci: keep sync-and-build workflow on Alpha"
+          git push -f origin "$UPSTREAM_BRANCH"
+
+          # 2) 把 With-At 补丁提交 rebase 到新上游之上
+          #    若此处冲突,任务会失败并通知你,按 fork-sync/SYNC.md 第三节手动解决
+          git checkout "$PATCH_BRANCH"
+          git rebase "upstream/$UPSTREAM_BRANCH"
+          git push -f origin "$PATCH_BRANCH"
+
+      # - name: Setup Go
+        # uses: actions/setup-go@v5
+        # with:
+          # go-version-file: go.mod
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+
+      - name: Sanity test
+        run: go test ./adapter/outbound/ -run TestHttpConnectLine -v
+
+      - name: Build eBPF binaries (no NDK needed, loader is pure Go)
+        run: |
+          set -e
+          VERSION="alpha-smart-$(git rev-parse --short HEAD)-with-at"
+          BUILDTIME="$(date -u)"
+          LD="-X \"github.com/metacubex/mihomo/constant.Version=$VERSION\" -X \"github.com/metacubex/mihomo/constant.BuildTime=$BUILDTIME\" -w -s -buildid="
+          # 二进制名与上游 build.yml 的 output 命名一致
+          # (android arm64 上游叫 arm64-v8;linux arm64 叫 arm64)
+          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-linux-arm64 .
+          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-android-arm64-v8 .
+          # 压缩方式与上游一致:gzip,归档名带版本号后缀
+          gzip -c mihomo-linux-arm64      > "mihomo-linux-arm64-${VERSION}.gz"
+          gzip -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+          # Mihomo's external-panel core updater reads this file, then fetches
+          # the matching architecture-specific .gz asset from the same release.
+          echo "$VERSION" > version.txt
+
+      - name: Clean stale assets from rolling release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 资产名含 commit 号,上游更新后名字会变;发布前清掉旧资产,
+          # 保证 with-at-latest 里永远只有当前版本的两个 .gz 和 version.txt。
+          # 不开 shell xtrace,避免把 Authorization header 写入日志。
+          set -euo pipefail
+          release_json="$(mktemp)"
+          trap 'rm -f "$release_json"' EXIT
+          status="$(curl -sS -o "$release_json" -w "%{http_code}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/with-at-latest")"
+          echo "release lookup -> HTTP $status"
+          if [[ "$status" == "404" ]]; then
+            echo "rolling release does not exist yet; nothing to clean"
+            exit 0
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "release lookup failed (HTTP $status)" >&2
+            cat "$release_json" >&2
+            exit 1
+          fi
+          ids="$(jq -r '.assets[]?.id' "$release_json")"
+          for id in $ids; do
+            status="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$id")"
+            echo "delete asset id=$id -> HTTP $status"
+            if [[ "$status" != "204" ]]; then
+              echo "failed to delete release asset $id (HTTP $status)" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: with-at-latest
+          name: "With-At eBPF build"
+          body: "自动构建:上游 liuran001/mihomo@Alpha + With-At 钉钉直连免流补丁。"
+          files: |
+            mihomo-linux-arm64-*.gz
+            mihomo-android-arm64-v8-*.gz
+            version.txt
+          make_latest: true
