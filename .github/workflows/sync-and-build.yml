@@ -60,12 +60,16 @@ jobs:
           git rebase "upstream/$UPSTREAM_BRANCH"
           git push -f origin "$PATCH_BRANCH"
 
+      # - name: Setup Go
+        # uses: actions/setup-go@v5
+        # with:
+          # go-version-file: go.mod
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
           go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
-
 
       - name: Sanity test
         run: go test ./adapter/outbound/ -run TestHttpConnectLine -v
