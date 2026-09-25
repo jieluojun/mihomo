@@ -98,7 +98,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: with-at-latest
-          name: "With-At eBPF build (${{ github.run_number }})"
+          name: "With-At eBPF build"
           body: "自动构建:上游 liuran001/mihomo@Alpha + With-At 钉钉直连免流补丁。"
           files: |
             mihomo-linux-arm64-*.gz
