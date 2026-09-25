@@ -202,8 +202,12 @@ func TestHttpConnectLineDelHost(t *testing.T) {
 	if want := "CONNECT example.com:443 HTTP/1.1"; firstLine(request) != want {
 		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
 	}
-	if strings.Contains(strings.ToLower(request), "host:") {
+	lower := strings.ToLower(request)
+	if strings.Contains(lower, "host:") {
 		t.Fatalf("Host header should have been deleted:\n%s", request)
+	}
+	if strings.Contains(lower, "user-agent:") {
+		t.Fatalf("default User-Agent should have been deleted with DelHost:\n%s", request)
 	}
 }
 
@@ -227,8 +231,12 @@ func TestHttpConnectLinePathAndDelHost(t *testing.T) {
 	if want := "CONNECT example.com:443@混淆 HTTP/1.1"; firstLine(request) != want {
 		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
 	}
-	if strings.Contains(strings.ToLower(request), "host:") {
+	lower := strings.ToLower(request)
+	if strings.Contains(lower, "host:") {
 		t.Fatalf("Host header should have been deleted:\n%s", request)
+	}
+	if strings.Contains(lower, "user-agent:") {
+		t.Fatalf("default User-Agent should have been deleted with DelHost:\n%s", request)
 	}
 }
 

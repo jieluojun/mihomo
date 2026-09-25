@@ -115,6 +115,7 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 	}
 
 	customHost := false
+	customUA := false
 	for key, value := range h.option.Headers {
 		switch {
 		// With-At: ported from the `with-at` branch of PuerNya/sing (the sing-box
@@ -140,6 +141,9 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 			if strings.EqualFold(key, "Host") {
 				customHost = true
 			}
+			if strings.EqualFold(key, "User-Agent") {
+				customUA = true
+			}
 			tempHeaders[key] = value
 		}
 	}
@@ -147,8 +151,16 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 	// TPBox Del Host: omit the default Host header. A custom Host in headers
 	// makes this a no-op, matching TPBox ("如果添加的自定义请求头中包含 Host,
 	// Del Host 将无效").
+	//
+	// Baidu squid (gzdt.baidu.com:443) treats Host or a non-empty User-Agent
+	// without X-T5-Auth as ERR_ACCESS_DENIED. The handshake TPBox actually
+	// gets 200 on is CONNECT + Proxy-Connection only, so also drop the
+	// default User-Agent unless the user set one.
 	if h.option.DelHost && !customHost {
 		delete(tempHeaders, "Host")
+		if !customUA {
+			delete(tempHeaders, "User-Agent")
+		}
 	}
 
 	if h.user != "" && h.pass != "" {
