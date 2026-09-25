@@ -23,12 +23,16 @@ import (
 	"github.com/metacubex/http"
 )
 
-const (
-	baseReleaseURL    = "https://github.com/MetaCubeX/mihomo/releases/latest/download/"
-	versionReleaseURL = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
+const withAtLatestURL = "https://github.com/jieluojun/mihomo/releases/download/with-at-latest/"
 
-	baseAlphaURL    = "https://github.com/liuran001/mihomo/releases/download/Prerelease-Alpha/"
-	versionAlphaURL = "https://github.com/liuran001/mihomo/releases/download/Prerelease-Alpha/version.txt"
+const (
+	// All channels intentionally use this fork's rolling release. The upstream
+	// updater assets do not contain the With-At patch and would replace this
+	// customized core with an upstream binary from the external panel.
+	baseReleaseURL    = withAtLatestURL
+	versionReleaseURL = withAtLatestURL + "version.txt"
+	baseAlphaURL      = withAtLatestURL
+	versionAlphaURL   = withAtLatestURL + "version.txt"
 
 	// MaxPackageFileSize is a maximum package file length in bytes. The largest
 	// package whose size is limited by this constant currently has the size of
