@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
@@ -100,7 +101,24 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 	}
 
 	for key, value := range h.option.Headers {
-		tempHeaders[key] = value
+		switch {
+		// With-At: ported from the `with-at` branch of PuerNya/sing (the sing-box
+		// dependency lib). Rewrites the CONNECT line into
+		// "CONNECT <target>@<free-flow-host> HTTP/1.1" so that the carrier
+		// zero-rating (免流) check or the upstream proxy's domain whitelist sees
+		// the free-flow domain (e.g. China Unicom DingTalk direct free-flow),
+		// while the actual target is still carried in front of the '@'.
+		// The header itself is consumed here and is NOT sent to the proxy.
+		case strings.EqualFold(key, "With-At") && value != "":
+			HeaderString = "CONNECT " + addr + "@" + value + " HTTP/1.1\r\n"
+		// Baidu-Direct: also from PuerNya/sing (baidu-direct branch), the
+		// "fake first packet" variant used by Baidu direct free-flow proxies:
+		// the space before "HTTP/1.1" is intentionally dropped.
+		case strings.EqualFold(key, "Baidu-Direct") && value == "true":
+			HeaderString = "CONNECT " + addr + "HTTP/1.1\r\n"
+		default:
+			tempHeaders[key] = value
+		}
 	}
 
 	if h.user != "" && h.pass != "" {
