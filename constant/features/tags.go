@@ -22,5 +22,8 @@ func Tags() (tags []string) {
 	if WithGVisor {
 		tags = append(tags, "with_gvisor")
 	}
+	if WithEBPF {
+		tags = append(tags, "with_ebpf")
+	}
 	return
 }
