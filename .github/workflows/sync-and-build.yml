@@ -6,6 +6,9 @@
 # 到 Alpha 分支(上游代码 + 本文件),所以默认分支保持 Alpha 即可,
 # 无需切换默认分支(切换在部分 fork 上会报 "Could not change default branch")。
 #
+# 产物命名与压缩方式和上游 build.yml 一致:
+#   mihomo-linux-arm64-<VERSION>.gz / mihomo-android-arm64-v8-<VERSION>.gz
+#
 # 前提:仓库 Settings -> Actions -> General -> Workflow permissions 设为
 #       "Read and write permissions";首次触发方式见 fork-sync/SYNC.md。
 
@@ -71,20 +74,33 @@ jobs:
           VERSION="alpha-smart-$(git rev-parse --short HEAD)-with-at"
           BUILDTIME="$(date -u)"
           LD="-X \"github.com/metacubex/mihomo/constant.Version=$VERSION\" -X \"github.com/metacubex/mihomo/constant.BuildTime=$BUILDTIME\" -w -s -buildid="
-          mkdir -p bin
-          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-linux-arm64 .
-          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-android-arm64 .
+          # 二进制名与上游 build.yml 的 output 命名一致
+          # (android arm64 上游叫 arm64-v8;linux arm64 叫 arm64)
+          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-linux-arm64 .
+          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-android-arm64-v8 .
+          # 压缩方式与上游一致:gzip,归档名带版本号后缀
+          gzip -c mihomo-linux-arm64      > "mihomo-linux-arm64-${VERSION}.gz"
+          gzip -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+
+      - name: Clean stale assets from rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 资产名含 commit 号,上游更新后名字会变;发布前清掉旧资产,
+          # 保证 with-at-latest 里永远只有当前版本的两个 .gz
+          if gh release view with-at-latest >/dev/null 2>&1; then
+            gh release view with-at-latest --json assets -q '.assets[].name' | while read -r asset; do
+              gh release delete-asset with-at-latest "$asset" --yes || true
+            done
+          fi
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: with-at-latest
           name: "With-At eBPF build (${{ github.run_number }})"
-          body: |
-            自动构建:上游 liuran001/mihomo@Alpha + With-At 钉钉直连免流补丁。
-            版本号 `alpha-smart-<commit>-with-at`,含 `with_gvisor` + `with_ebpf`。
-            同步提交:${{ github.sha }}
+          body: "自动构建:上游 liuran001/mihomo@Alpha + With-At 钉钉直连免流补丁。"
           files: |
-            bin/mihomo-linux-arm64
-            bin/mihomo-android-arm64
+            mihomo-linux-arm64-*.gz
+            mihomo-android-arm64-v8-*.gz
           make_latest: true
