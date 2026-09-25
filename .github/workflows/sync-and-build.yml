@@ -83,16 +83,20 @@ jobs:
           gzip -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
 
       - name: Clean stale assets from rolling release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           # 资产名含 commit 号,上游更新后名字会变;发布前清掉旧资产,
-          # 保证 with-at-latest 里永远只有当前版本的两个 .gz
-          if gh release view with-at-latest >/dev/null 2>&1; then
-            gh release view with-at-latest --json assets -q '.assets[].name' | while read -r asset; do
-              gh release delete-asset with-at-latest "$asset" --yes || true
-            done
-          fi
+          # 保证 with-at-latest 里永远只有当前版本的两个 .gz。
+          # 用 REST API 直删,每次删除打印 HTTP 状态(204=成功),便于排查。
+          set -x
+          ids=$(curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/with-at-latest" \
+            | jq -r '.assets[].id') || ids=""
+          for id in $ids; do
+            curl -s -o /dev/null -w "delete asset id=$id -> HTTP %{http_code}\n" -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$id"
+          done
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
