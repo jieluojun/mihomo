@@ -1,12 +1,13 @@
 # 放到 fork 仓库 with-at 分支的 .github/workflows/sync-and-build.yml
 # 功能:同步上游 -> rebase With-At 补丁 -> 编译 eBPF 版 -> 发布滚动 Release
-# 前提:1) 仓库 Settings -> Actions -> General -> Workflow permissions 设为
-#          "Read and write permissions"
-#       2) 注意 GitHub 的默认分支限制:schedule 定时触发和 Actions 页面的
-#          "Run workflow" 按钮只对本工作流文件存在于【默认分支】时生效。
-#          建议把 fork 默认分支切换为 with-at(Settings -> General ->
-#          Default branch);否则只能用 gh CLI / API 指定 --ref with-at
-#          手动触发(命令见 fork-sync/SYNC.md)。
+#
+# 设计说明:GitHub 的 schedule 定时触发和 Actions 页面的 "Run workflow" 按钮
+# 只对【默认分支】上存在的工作流文件生效。本工作流每次运行时会把自己复制一份
+# 到 Alpha 分支(上游代码 + 本文件),所以默认分支保持 Alpha 即可,
+# 无需切换默认分支(切换在部分 fork 上会报 "Could not change default branch")。
+#
+# 前提:仓库 Settings -> Actions -> General -> Workflow permissions 设为
+#       "Read and write permissions";首次触发方式见 fork-sync/SYNC.md。
 
 name: sync-upstream-and-build
 
@@ -22,6 +23,7 @@ env:
   UPSTREAM: https://github.com/liuran001/mihomo.git
   UPSTREAM_BRANCH: Alpha
   PATCH_BRANCH: with-at
+  WORKFLOW_PATH: .github/workflows/sync-and-build.yml
 
 jobs:
   sync-and-build:
@@ -33,7 +35,7 @@ jobs:
           ref: with-at
           fetch-depth: 0
 
-      - name: Sync upstream and rebase With-At patches
+      - name: Sync upstream, keep workflow on Alpha, rebase patches
         run: |
           set -e
           git config user.name  "github-actions[bot]"
@@ -41,8 +43,12 @@ jobs:
           git remote add upstream "$UPSTREAM" || true
           git fetch upstream "$UPSTREAM_BRANCH"
 
-          # 1) fork 的 Alpha 强制对齐上游
+          # 1) Alpha = 上游最新代码 + 本工作流文件的一份拷贝
+          #    (保证默认分支上始终有本工作流,定时触发和按钮持续可用)
           git checkout -B "$UPSTREAM_BRANCH" "upstream/$UPSTREAM_BRANCH"
+          git checkout "$PATCH_BRANCH" -- "$WORKFLOW_PATH"
+          git add "$WORKFLOW_PATH"
+          git diff --cached --quiet || git commit -m "ci: keep sync-and-build workflow on Alpha"
           git push -f origin "$UPSTREAM_BRANCH"
 
           # 2) 把 With-At 补丁提交 rebase 到新上游之上
@@ -68,7 +74,6 @@ jobs:
           mkdir -p bin
           GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-linux-arm64 .
           GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o bin/mihomo-android-arm64 .
-          ./bin/mihomo-linux-arm64 -v || true # arm64 产物,宿主机无法执行,忽略
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
