@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/metacubex/mihomo/common/structure"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -62,6 +63,11 @@ func startFakeProxy(t *testing.T) (string, <-chan string) {
 // CONNECT request the proxy received.
 func dialThroughFakeProxy(t *testing.T, headers map[string]string) string {
 	t.Helper()
+	return dialThroughFakeProxyOpt(t, HttpOption{Headers: headers})
+}
+
+func dialThroughFakeProxyOpt(t *testing.T, option HttpOption) string {
+	t.Helper()
 
 	addr, requests := startFakeProxy(t)
 	host, portStr, err := net.SplitHostPort(addr)
@@ -73,12 +79,10 @@ func dialThroughFakeProxy(t *testing.T, headers map[string]string) string {
 		t.Fatal(err)
 	}
 
-	proxy, err := NewHttp(HttpOption{
-		Name:    "mianliu-test",
-		Server:  host,
-		Port:    port,
-		Headers: headers,
-	})
+	option.Name = "mianliu-test"
+	option.Server = host
+	option.Port = port
+	proxy, err := NewHttp(option)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,5 +172,112 @@ func TestHttpConnectLineWithNormalHeader(t *testing.T) {
 	}
 	if !strings.Contains(request, "X-Custom: hello\r\n") {
 		t.Fatalf("custom header missing in request:\n%s", request)
+	}
+}
+
+// Path is appended to the CONNECT target (TPBox-ForAndroid).
+func TestHttpConnectLinePath(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{Path: "/foo"})
+	if want := "CONNECT example.com:443/foo HTTP/1.1"; firstLine(request) != want {
+		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
+	}
+	if !strings.Contains(request, "Host: example.com:443\r\n") {
+		t.Fatalf("Host header missing in request:\n%s", request)
+	}
+}
+
+func TestHttpConnectLinePathAtObfuscation(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{Path: "@混淆"})
+	if want := "CONNECT example.com:443@混淆 HTTP/1.1"; firstLine(request) != want {
+		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
+	}
+	if !strings.Contains(request, "Host: example.com:443\r\n") {
+		t.Fatalf("Host header should keep the real target:\n%s", request)
+	}
+}
+
+// DelHost omits the default Host header (TPBox-ForAndroid).
+func TestHttpConnectLineDelHost(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{DelHost: true})
+	if want := "CONNECT example.com:443 HTTP/1.1"; firstLine(request) != want {
+		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
+	}
+	if strings.Contains(strings.ToLower(request), "host:") {
+		t.Fatalf("Host header should have been deleted:\n%s", request)
+	}
+}
+
+// A custom Host in headers makes DelHost a no-op.
+func TestHttpConnectLineDelHostWithCustomHost(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{
+		DelHost: true,
+		Headers: map[string]string{"Host": "www.google.com"},
+	})
+	if !strings.Contains(request, "Host: www.google.com\r\n") {
+		t.Fatalf("custom Host should win over DelHost:\n%s", request)
+	}
+}
+
+// TPBox 百度直连: path="@混淆" + del_host=true
+func TestHttpConnectLinePathAndDelHost(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{
+		Path:    "@混淆",
+		DelHost: true,
+	})
+	if want := "CONNECT example.com:443@混淆 HTTP/1.1"; firstLine(request) != want {
+		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
+	}
+	if strings.Contains(strings.ToLower(request), "host:") {
+		t.Fatalf("Host header should have been deleted:\n%s", request)
+	}
+}
+
+// Config decoder accepts both TPBox/sing-box del_host and mihomo del-host.
+func TestHttpOptionDecodePathAndDelHost(t *testing.T) {
+	decoder := structure.NewDecoder(structure.Option{
+		TagName:          "proxy",
+		WeaklyTypedInput: true,
+		KeyReplacer:      structure.DefaultKeyReplacer,
+	})
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{name: "kebab", key: "del-host"},
+		{name: "snake", key: "del_host"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := map[string]any{
+				"name":   "百度直连",
+				"server": "14.215.182.75",
+				"port":   443,
+				"path":   "@混淆",
+				tc.key:  true,
+			}
+			var opt HttpOption
+			if err := decoder.Decode(src, &opt); err != nil {
+				t.Fatal(err)
+			}
+			if opt.Path != "@混淆" {
+				t.Fatalf("Path = %q, want %q", opt.Path, "@混淆")
+			}
+			if !opt.DelHost {
+				t.Fatalf("%s did not set DelHost", tc.key)
+			}
+		})
+	}
+}
+
+// Dedicated Path field wins over the With-At pseudo header.
+func TestHttpConnectLinePathWinsOverWithAt(t *testing.T) {
+	request := dialThroughFakeProxyOpt(t, HttpOption{
+		Path:    "@混淆",
+		Headers: map[string]string{"With-At": "im.dingtalk.com"},
+	})
+	if want := "CONNECT example.com:443@混淆 HTTP/1.1"; firstLine(request) != want {
+		t.Fatalf("CONNECT line = %q, want %q", firstLine(request), want)
+	}
+	if strings.Contains(strings.ToLower(request), "with-at:") {
+		t.Fatalf("With-At header leaked into the request:\n%s", request)
 	}
 }

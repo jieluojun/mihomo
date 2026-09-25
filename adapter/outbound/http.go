@@ -41,6 +41,13 @@ type HttpOption struct {
 	Certificate    string            `proxy:"certificate,omitempty"`
 	PrivateKey     string            `proxy:"private-key,omitempty"`
 	Headers        map[string]string `proxy:"headers,omitempty"`
+	// Path is appended to the CONNECT target (ported from TPBox-ForAndroid).
+	// e.g. path: "@混淆" -> "CONNECT example.com:443@混淆 HTTP/1.1"
+	Path string `proxy:"path,omitempty"`
+	// DelHost drops the default Host header (ported from TPBox-ForAndroid).
+	// Ineffective if headers already contains Host. YAML/JSON aliases
+	// del-host and del_host both work via the decoder KeyReplacer.
+	DelHost bool `proxy:"del-host,omitempty"`
 }
 
 // StreamConnContext implements C.ProxyAdapter
@@ -93,13 +100,21 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 	}
 
 	addr := metadata.RemoteAddress()
-	HeaderString := "CONNECT " + addr + " HTTP/1.1\r\n"
+	connectTarget := addr
+	if h.option.Path != "" {
+		// TPBox: CONNECT <host:port><path> HTTP/1.1
+		// path "/foo"  -> CONNECT example.com:443/foo HTTP/1.1
+		// path "@混淆" -> CONNECT example.com:443@混淆 HTTP/1.1
+		connectTarget = addr + h.option.Path
+	}
+	HeaderString := "CONNECT " + connectTarget + " HTTP/1.1\r\n"
 	tempHeaders := map[string]string{
 		"Host":             addr,
 		"User-Agent":       "Go-http-client/1.1",
 		"Proxy-Connection": "Keep-Alive",
 	}
 
+	customHost := false
 	for key, value := range h.option.Headers {
 		switch {
 		// With-At: ported from the `with-at` branch of PuerNya/sing (the sing-box
@@ -109,16 +124,31 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 		// the free-flow domain (e.g. China Unicom DingTalk direct free-flow),
 		// while the actual target is still carried in front of the '@'.
 		// The header itself is consumed here and is NOT sent to the proxy.
+		// Skipped when Path is set: Path is the dedicated TPBox field and wins.
 		case strings.EqualFold(key, "With-At") && value != "":
-			HeaderString = "CONNECT " + addr + "@" + value + " HTTP/1.1\r\n"
+			if h.option.Path == "" {
+				HeaderString = "CONNECT " + addr + "@" + value + " HTTP/1.1\r\n"
+			}
 		// Baidu-Direct: also from PuerNya/sing (baidu-direct branch), the
 		// "fake first packet" variant used by Baidu direct free-flow proxies:
 		// the space before "HTTP/1.1" is intentionally dropped.
 		case strings.EqualFold(key, "Baidu-Direct") && value == "true":
-			HeaderString = "CONNECT " + addr + "HTTP/1.1\r\n"
+			if h.option.Path == "" {
+				HeaderString = "CONNECT " + addr + "HTTP/1.1\r\n"
+			}
 		default:
+			if strings.EqualFold(key, "Host") {
+				customHost = true
+			}
 			tempHeaders[key] = value
 		}
+	}
+
+	// TPBox Del Host: omit the default Host header. A custom Host in headers
+	// makes this a no-op, matching TPBox ("如果添加的自定义请求头中包含 Host,
+	// Del Host 将无效").
+	if h.option.DelHost && !customHost {
+		delete(tempHeaders, "Host")
 	}
 
 	if h.user != "" && h.pass != "" {
