@@ -46,6 +46,7 @@ const (
 	INNER
 	EBPF
 	TAILSCALE
+	CNS
 )
 
 type AddrType byte
@@ -132,6 +133,8 @@ func (t Type) String() string {
 		return "EBPF"
 	case TAILSCALE:
 		return "Tailscale"
+	case CNS:
+		return "Cns"
 	default:
 		return "Unknown"
 	}
@@ -186,6 +189,8 @@ func ParseType(t string) (*Type, error) {
 		res = EBPF
 	case "TAILSCALE":
 		res = TAILSCALE
+	case "CNS":
+		res = CNS
 	default:
 		return nil, fmt.Errorf("unknown type: %s", t)
 	}
