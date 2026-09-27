@@ -34,6 +34,13 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewHTTP(httpOption)
+	case "cns":
+		cnsOption := &IN.CnsOption{}
+		err = decoder.Decode(mapping, cnsOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewCns(cnsOption)
 	case "tproxy":
 		tproxyOption := &IN.TProxyOption{UDP: true}
 		err = decoder.Decode(mapping, tproxyOption)
