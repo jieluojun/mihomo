@@ -1,0 +1,1785 @@
+From 278442aa072b5689674ea8370808f40588211c3e Mon Sep 17 00:00:00 2001
+From: with-at-porter <with-at@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 23:38:50 +0000
+Subject: [PATCH 5/5] feat: add CNS protocol (outbound + inbound)
+
+Outbound type: cns from changliuxian/mihomo-cns (HTTP handshake, XOR TCP,
+UDP-over-TCP). Inbound listeners type: cns (AiziChen/CNS).
+
+Camouflage Host is written into the CONNECT request-line
+(CONNECT host:443) so carrier DPI does not classify the tunnel as
+generic HTTP-proxy traffic. Real destination stays in Proxy_key.
+---
+ adapter/outbound/cns.go      | 254 +++++++++++++++++++++++++++++++++++
+ adapter/outbound/cns_test.go | 197 +++++++++++++++++++++++++++
+ adapter/parser.go            |   7 +
+ adapter/parser_cns_test.go   |  32 +++++
+ constant/adapters.go         |   3 +
+ constant/metadata.go         |  57 ++++----
+ listener/cns/packet.go       |  35 +++++
+ listener/cns/server.go       | 185 +++++++++++++++++++++++++
+ listener/cns/server_test.go  | 156 +++++++++++++++++++++
+ listener/inbound/cns.go      |  86 ++++++++++++
+ listener/parse.go            |   7 +
+ transport/cns/enc.go         |  58 ++++++++
+ transport/cns/enc_test.go    |  60 +++++++++
+ transport/cns/tcp.go         |  70 ++++++++++
+ transport/cns/tcp_test.go    |  70 ++++++++++
+ transport/cns/udp.go         | 179 ++++++++++++++++++++++++
+ transport/cns/udp_test.go    |  71 ++++++++++
+ 17 files changed, 1501 insertions(+), 26 deletions(-)
+ create mode 100644 adapter/outbound/cns.go
+ create mode 100644 adapter/outbound/cns_test.go
+ create mode 100644 adapter/parser_cns_test.go
+ create mode 100644 listener/cns/packet.go
+ create mode 100644 listener/cns/server.go
+ create mode 100644 listener/cns/server_test.go
+ create mode 100644 listener/inbound/cns.go
+ create mode 100644 transport/cns/enc.go
+ create mode 100644 transport/cns/enc_test.go
+ create mode 100644 transport/cns/tcp.go
+ create mode 100644 transport/cns/tcp_test.go
+ create mode 100644 transport/cns/udp.go
+ create mode 100644 transport/cns/udp_test.go
+
+diff --git a/adapter/outbound/cns.go b/adapter/outbound/cns.go
+new file mode 100644
+index 0000000..bd5d7ba
+--- /dev/null
++++ b/adapter/outbound/cns.go
+@@ -0,0 +1,254 @@
++package outbound
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net"
++	"sort"
++	"strconv"
++	"strings"
++
++	N "github.com/metacubex/mihomo/common/net"
++	C "github.com/metacubex/mihomo/constant"
++	TC "github.com/metacubex/mihomo/transport/cns"
++
++	"github.com/metacubex/http"
++)
++
++const (
++	defaultCnsKey  = "Meng"
++	defaultCnsFlag = "httpUDP"
++)
++
++type Cns struct {
++	*Base
++	option *CnsOption
++}
++
++type CnsOption struct {
++	BasicOption
++	Name     string            `proxy:"name"`
++	Server   string            `proxy:"server"`
++	Port     int               `proxy:"port"`
++	Key      string            `proxy:"key,omitempty"`
++	Password string            `proxy:"password,omitempty"`
++	Flag     string            `proxy:"flag,omitempty"`
++	UDP      bool              `proxy:"udp,omitempty"`
++	Headers  map[string]string `proxy:"headers,omitempty"`
++}
++
++// StreamConnContext implements C.ProxyAdapter.
++func (cns *Cns) StreamConnContext(ctx context.Context, conn net.Conn, metadata *C.Metadata) (net.Conn, error) {
++	conn, err := cns.shakeHand(ctx, conn, metadata, false)
++	if err != nil {
++		return nil, err
++	}
++	return TC.NewCnsConn(conn, cns.option.Password), nil
++}
++
++// DialContext implements C.ProxyAdapter.
++func (cns *Cns) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
++	conn, err := cns.dialer.DialContext(ctx, "tcp", cns.addr)
++	if err != nil {
++		return nil, fmt.Errorf("%s connect error: %w", cns.addr, err)
++	}
++	defer func() {
++		safeConnClose(conn, err)
++	}()
++
++	conn, err = cns.StreamConnContext(ctx, conn, metadata)
++	if err != nil {
++		return nil, err
++	}
++	return NewConn(conn, cns), nil
++}
++
++// ListenPacketContext implements C.ProxyAdapter.
++func (cns *Cns) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
++	if !cns.option.UDP {
++		return nil, C.ErrNotSupport
++	}
++	if err = cns.ResolveUDP(ctx, metadata); err != nil {
++		return nil, err
++	}
++
++	conn, err := cns.dialer.DialContext(ctx, "tcp", cns.addr)
++	if err != nil {
++		return nil, fmt.Errorf("%s connect error: %w", cns.addr, err)
++	}
++	defer func() {
++		safeConnClose(conn, err)
++	}()
++
++	conn, err = cns.shakeHand(ctx, conn, metadata, true)
++	if err != nil {
++		return nil, err
++	}
++	return NewPacketConn(TC.NewUDPPacketConn(conn, cns.option.Password), cns), nil
++}
++
++// ProxyInfo implements C.ProxyAdapter.
++func (cns *Cns) ProxyInfo() C.ProxyInfo {
++	info := cns.Base.ProxyInfo()
++	info.DialerProxy = cns.option.DialerProxy
++	return info
++}
++
++func (cns *Cns) shakeHand(ctx context.Context, conn net.Conn, metadata *C.Metadata, udp bool) (_ net.Conn, err error) {
++	if ctx.Done() != nil {
++		done := N.SetupContextForConn(ctx, conn)
++		defer done(&err)
++	}
++
++	request, err := cns.requestHeader(metadata, udp)
++	if err != nil {
++		return nil, err
++	}
++	if err = writeCnsRequest(conn, request); err != nil {
++		return nil, fmt.Errorf("write CNS handshake: %w", err)
++	}
++
++	bufferedConn := N.NewBufferedConn(conn)
++	response, err := http.ReadResponse(bufferedConn.Reader(), &http.Request{Method: http.MethodConnect})
++	if err != nil {
++		return nil, fmt.Errorf("read CNS handshake: %w", err)
++	}
++	if response.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("CNS handshake rejected: %s", response.Status)
++	}
++	return bufferedConn, nil
++}
++
++func (cns *Cns) camouflageHost() string {
++	for key, value := range cns.option.Headers {
++		if strings.EqualFold(key, "Host") && strings.TrimSpace(value) != "" {
++			return strings.TrimSpace(value)
++		}
++	}
++	return ""
++}
++
++func (cns *Cns) requestHeader(metadata *C.Metadata, udp bool) (string, error) {
++	if metadata == nil || !metadata.Valid() || metadata.DstPort == 0 {
++		return "", errors.New("invalid CNS destination metadata")
++	}
++
++	encodedTarget := TC.EncryptHost(metadata.RemoteAddress(), cns.option.Password)
++	var builder strings.Builder
++	builder.Grow(160 + len(encodedTarget))
++	// DPI matches the CONNECT request-line, not the Host header.
++	// "CONNECT /" is classified as generic HTTP-proxy traffic.
++	// With camouflage Host, emit CONNECT host[:port] (default port 443).
++	// Real destination stays in Proxy_key; CNS server ignores CONNECT URI.
++	connectTarget := "/"
++	if camouflage := cns.camouflageHost(); camouflage != "" {
++		connectTarget = camouflage
++		if _, _, err := net.SplitHostPort(camouflage); err != nil {
++			connectTarget = net.JoinHostPort(camouflage, "443")
++		}
++	}
++	builder.WriteString("CONNECT ")
++	builder.WriteString(connectTarget)
++	builder.WriteString(" HTTP/1.1\r\n")
++	// The CNS server selects the first occurrence of Proxy_key, so keep the
++	// target-bearing field before camouflage headers (notably when key=Host).
++	builder.WriteString(cns.option.Key)
++	builder.WriteString(": ")
++	builder.WriteString(encodedTarget)
++	builder.WriteString("\r\n")
++	if udp {
++		builder.WriteString(cns.option.Flag)
++		builder.WriteString("\r\n")
++	}
++
++	headers := make(map[string]string, len(cns.option.Headers)+3)
++	headers["Host"] = cns.option.Server
++	headers["DNT"] = "1"
++	headers["Connection"] = "keep-alive"
++	for key, value := range cns.option.Headers {
++		if strings.ContainsAny(key, "\r\n") || strings.ContainsAny(value, "\r\n") {
++			return "", fmt.Errorf("invalid CNS header %q", key)
++		}
++		for existingKey := range headers {
++			if strings.EqualFold(existingKey, key) {
++				delete(headers, existingKey)
++			}
++		}
++		headers[key] = value
++	}
++
++	keys := make([]string, 0, len(headers))
++	for key := range headers {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	for _, key := range keys {
++		builder.WriteString(key)
++		builder.WriteString(": ")
++		builder.WriteString(headers[key])
++		builder.WriteString("\r\n")
++	}
++
++	builder.WriteString("\r\n")
++	return builder.String(), nil
++}
++
++func writeCnsRequest(conn net.Conn, request string) error {
++	data := []byte(request)
++	for len(data) > 0 {
++		n, err := conn.Write(data)
++		if n > 0 {
++			data = data[n:]
++		}
++		if err != nil {
++			return err
++		}
++		if n == 0 {
++			return errors.New("short CNS handshake write")
++		}
++	}
++	return nil
++}
++
++func NewCns(option CnsOption) (*Cns, error) {
++	if option.Name == "" {
++		return nil, errors.New("missing CNS name")
++	}
++	if option.Server == "" {
++		return nil, errors.New("missing CNS server")
++	}
++	if option.Port < 1 || option.Port > 65535 {
++		return nil, fmt.Errorf("invalid CNS port: %d", option.Port)
++	}
++	if option.Key == "" {
++		option.Key = defaultCnsKey
++	}
++	if option.Flag == "" {
++		option.Flag = defaultCnsFlag
++	}
++	if strings.ContainsAny(option.Key, "\r\n") {
++		return nil, errors.New("invalid CNS key")
++	}
++	if strings.ContainsAny(option.Flag, "\r\n") {
++		return nil, errors.New("invalid CNS UDP flag")
++	}
++
++	outbound := &Cns{
++		Base: NewBase(BaseOption{
++			Name:         option.Name,
++			Addr:         net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
++			Type:         C.Cns,
++			ProviderName: option.ProviderName,
++			UDP:          option.UDP,
++			TFO:          option.TFO,
++			MPTCP:        option.MPTCP,
++			Interface:    option.Interface,
++			RoutingMark:  option.RoutingMark,
++			Prefer:       option.IPVersion,
++		}),
++		option: &option,
++	}
++	outbound.dialer = option.NewDialer(outbound.DialOptions())
++	return outbound, nil
++}
+diff --git a/adapter/outbound/cns_test.go b/adapter/outbound/cns_test.go
+new file mode 100644
+index 0000000..432488d
+--- /dev/null
++++ b/adapter/outbound/cns_test.go
+@@ -0,0 +1,197 @@
++package outbound
++
++import (
++	"bufio"
++	"context"
++	"io"
++	"net"
++	"strings"
++	"testing"
++
++	C "github.com/metacubex/mihomo/constant"
++	TC "github.com/metacubex/mihomo/transport/cns"
++)
++
++func TestCnsRequestHeaderDefaults(t *testing.T) {
++	adapter, err := NewCns(CnsOption{
++		Name:     "cns-test",
++		Server:   "cns.example",
++		Port:     23333,
++		Password: "secret",
++		UDP:      true,
++		Headers: map[string]string{
++			"Host": "camouflage.example",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if adapter.option.Key != defaultCnsKey {
++		t.Fatalf("default key = %q", adapter.option.Key)
++	}
++	if adapter.option.Flag != defaultCnsFlag {
++		t.Fatalf("default UDP flag = %q", adapter.option.Flag)
++	}
++
++	metadata := &C.Metadata{Host: "target.example", DstPort: 443}
++	header, err := adapter.requestHeader(metadata, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasPrefix(header, "CONNECT camouflage.example:443 HTTP/1.1\r\n") {
++		t.Fatalf("unexpected request line: %q", header)
++	}
++	if !strings.Contains(header, "Host: camouflage.example\r\n") {
++		t.Fatalf("custom Host header missing: %q", header)
++	}
++	wantTarget := defaultCnsKey + ": " + TC.EncryptHost(metadata.RemoteAddress(), "secret") + "\r\n"
++	if !strings.Contains(header, wantTarget) {
++		t.Fatalf("encrypted target header missing: %q", header)
++	}
++	if !strings.Contains(header, defaultCnsFlag+"\r\n") {
++		t.Fatalf("UDP flag missing: %q", header)
++	}
++}
++
++
++func TestCnsRequestHeaderDefaultConnectSlash(t *testing.T) {
++	adapter, err := NewCns(CnsOption{
++		Name:   "cns-test",
++		Server: "cns.example",
++		Port:   23333,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	header, err := adapter.requestHeader(&C.Metadata{Host: "target.example", DstPort: 443}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasPrefix(header, "CONNECT / HTTP/1.1\r\n") {
++		t.Fatalf("without camouflage Host the CONNECT target must stay /: %q", header)
++	}
++	if !strings.Contains(header, "Host: cns.example\r\n") {
++		t.Fatalf("default Host should be the CNS server: %q", header)
++	}
++}
++
++func TestCnsRequestHeaderHostWithPort(t *testing.T) {
++	adapter, err := NewCns(CnsOption{
++		Name:   "cns-test",
++		Server: "cns.example",
++		Port:   23333,
++		Headers: map[string]string{
++			"Host": "m.youku.com:80",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	header, err := adapter.requestHeader(&C.Metadata{Host: "target.example", DstPort: 443}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.HasPrefix(header, "CONNECT m.youku.com:80 HTTP/1.1\r\n") {
++		t.Fatalf("Host with port should be used as CONNECT target: %q", header)
++	}
++	if !strings.Contains(header, "Host: m.youku.com:80\r\n") {
++		t.Fatalf("Host header should keep the user value: %q", header)
++	}
++}
++
++func TestCnsTargetPrecedesCamouflageWhenKeyIsHost(t *testing.T) {
++	adapter, err := NewCns(CnsOption{
++		Name:     "cns-test",
++		Server:   "cns.example",
++		Port:     23333,
++		Key:      "Host",
++		Password: "secret",
++		Headers: map[string]string{
++			"host": "camouflage.example",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	header, err := adapter.requestHeader(&C.Metadata{Host: "target.example", DstPort: 443}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	wantPrefix := "CONNECT camouflage.example:443 HTTP/1.1\r\nHost: " + TC.EncryptHost("target.example:443", "secret") + "\r\n"
++	if !strings.HasPrefix(header, wantPrefix) {
++		t.Fatalf("target key is not the first Host occurrence: %q", header)
++	}
++	if strings.Count(strings.ToLower(header), "host: camouflage.example\r\n") != 1 {
++		t.Fatalf("case-insensitive Host override was not applied once: %q", header)
++	}
++}
++
++func TestCnsHandshakePreservesBufferedTunnelData(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	adapter, err := NewCns(CnsOption{
++		Name:     "cns-test",
++		Server:   "127.0.0.1",
++		Port:     23333,
++		Password: "secret",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	const tunnelPayload = "first bytes after CNS response"
++	serverErr := make(chan error, 1)
++	go func() {
++		reader := bufio.NewReader(serverRaw)
++		var request strings.Builder
++		for {
++			line, readErr := reader.ReadString('\n')
++			if readErr != nil {
++				serverErr <- readErr
++				return
++			}
++			request.WriteString(line)
++			if strings.HasSuffix(request.String(), "\r\n\r\n") {
++				break
++			}
++		}
++		if !strings.Contains(request.String(), defaultCnsKey) {
++			serverErr <- &cnsTestMismatchError{got: request.String(), want: "CNS key header"}
++			return
++		}
++
++		encrypted := []byte(tunnelPayload)
++		TC.Xorcrypt(encrypted, []byte("secret"), 0)
++		response := append([]byte("HTTP/1.1 200 Connection established\r\nConnection: keep-alive\r\n\r\n"), encrypted...)
++		_, writeErr := serverRaw.Write(response)
++		serverErr <- writeErr
++	}()
++
++	metadata := &C.Metadata{Host: "target.example", DstPort: 443}
++	conn, err := adapter.StreamConnContext(context.Background(), clientRaw, metadata)
++	if err != nil {
++		t.Fatal(err)
++	}
++	received := make([]byte, len(tunnelPayload))
++	if _, err := io.ReadFull(conn, received); err != nil {
++		t.Fatal(err)
++	}
++	if string(received) != tunnelPayload {
++		t.Fatalf("tunnel payload = %q, want %q", received, tunnelPayload)
++	}
++	if err := <-serverErr; err != nil {
++		t.Fatal(err)
++	}
++}
++
++type cnsTestMismatchError struct {
++	got  string
++	want string
++}
++
++func (e *cnsTestMismatchError) Error() string {
++	return "payload mismatch: got " + e.got + ", want " + e.want
++}
+diff --git a/adapter/parser.go b/adapter/parser.go
+index 68bccdb..ae04181 100644
+--- a/adapter/parser.go
++++ b/adapter/parser.go
+@@ -51,14 +51,21 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
+ 	case "http":
+ 		httpOption := &outbound.HttpOption{BasicOption: basicOption}
+ 		err = decoder.Decode(mapping, httpOption)
+ 		if err != nil {
+ 			break
+ 		}
+ 		proxy, err = outbound.NewHttp(*httpOption)
++	case "cns":
++		cnsOption := &outbound.CnsOption{BasicOption: basicOption}
++		err = decoder.Decode(mapping, cnsOption)
++		if err != nil {
++			break
++		}
++		proxy, err = outbound.NewCns(*cnsOption)
+ 	case "vmess":
+ 		vmessOption := &outbound.VmessOption{BasicOption: basicOption}
+ 		err = decoder.Decode(mapping, vmessOption)
+ 		if err != nil {
+ 			break
+ 		}
+ 		proxy, err = outbound.NewVmess(*vmessOption)
+diff --git a/adapter/parser_cns_test.go b/adapter/parser_cns_test.go
+new file mode 100644
+index 0000000..0072a4a
+--- /dev/null
++++ b/adapter/parser_cns_test.go
+@@ -0,0 +1,32 @@
++package adapter
++
++import (
++	"testing"
++
++	C "github.com/metacubex/mihomo/constant"
++)
++
++func TestParseCnsProxy(t *testing.T) {
++	proxy, err := ParseProxy(map[string]any{
++		"name":     "cns-test",
++		"type":     "cns",
++		"server":   "127.0.0.1",
++		"port":     23333,
++		"key":      "Meng",
++		"password": "secret",
++		"flag":     "httpUDP",
++		"udp":      true,
++		"headers": map[string]any{
++			"Host": "camouflage.example",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if proxy.Type() != C.Cns {
++		t.Fatalf("proxy type = %s, want Cns", proxy.Type())
++	}
++	if !proxy.SupportUDP() {
++		t.Fatal("parsed CNS proxy does not advertise UDP support")
++	}
++}
+diff --git a/constant/adapters.go b/constant/adapters.go
+index 361e7fe..b1efe02 100644
+--- a/constant/adapters.go
++++ b/constant/adapters.go
+@@ -52,14 +52,15 @@ const (
+ 	TrustTunnel
+ 	ShadowQuic
+ 	OpenVPN
+ 	Tailscale
+ 	ZeroTier
+ 	EasyTier
+ 	GostRelay
++	Cns
+ )
+ 
+ const (
+ 	DefaultTCPTimeout = dialer.DefaultTCPTimeout
+ 	DefaultUDPTimeout = dialer.DefaultUDPTimeout
+ 	DefaultDropTime   = 12 * DefaultTCPTimeout
+ 	DefaultTLSTimeout = DefaultTCPTimeout
+@@ -241,14 +242,16 @@ func (at AdapterType) String() string {
+ 		return "Tailscale"
+ 	case ZeroTier:
+ 		return "ZeroTier"
+ 	case EasyTier:
+ 		return "EasyTier"
+ 	case GostRelay:
+ 		return "GostRelay"
++	case Cns:
++		return "Cns"
+ 	case Relay:
+ 		return "Relay"
+ 	case Selector:
+ 		return "Selector"
+ 	case Fallback:
+ 		return "Fallback"
+ 	case URLTest:
+diff --git a/constant/metadata.go b/constant/metadata.go
+index 42541b7..6d45a0a 100644
+--- a/constant/metadata.go
++++ b/constant/metadata.go
+@@ -42,14 +42,15 @@ const (
+ 	MIERU
+ 	SUDOKU
+ 	TRUSTTUNNEL
+ 	SHADOWQUIC
+ 	INNER
+ 	EBPF
+ 	TAILSCALE
++	CNS
+ )
+ 
+ type AddrType byte
+ 
+ func (a AddrType) String() string {
+ 	switch a {
+ 	case AtypIPv4:
+@@ -128,14 +129,16 @@ func (t Type) String() string {
+ 		return "ShadowQuic"
+ 	case INNER:
+ 		return "Inner"
+ 	case EBPF:
+ 		return "EBPF"
+ 	case TAILSCALE:
+ 		return "Tailscale"
++	case CNS:
++		return "Cns"
+ 	default:
+ 		return "Unknown"
+ 	}
+ }
+ 
+ func ParseType(t string) (*Type, error) {
+ 	var res Type
+@@ -182,52 +185,54 @@ func ParseType(t string) (*Type, error) {
+ 		res = SHADOWQUIC
+ 	case "INNER":
+ 		res = INNER
+ 	case "EBPF":
+ 		res = EBPF
+ 	case "TAILSCALE":
+ 		res = TAILSCALE
++	case "CNS":
++		res = CNS
+ 	default:
+ 		return nil, fmt.Errorf("unknown type: %s", t)
+ 	}
+ 	return &res, nil
+ }
+ 
+ func (t Type) MarshalJSON() ([]byte, error) {
+ 	return json.Marshal(t.String())
+ }
+ 
+ // Metadata is used to store connection address
+ type Metadata struct {
+-	NetWork      NetWork    `json:"network"`
+-	Type         Type       `json:"type"`
+-	SrcIP        netip.Addr `json:"sourceIP"`
+-	DstIP        netip.Addr `json:"destinationIP"`
+-	SrcGeoIP     []string   `json:"sourceGeoIP"`      // can be nil if never queried, empty slice if got no result
+-	DstGeoIP     []string   `json:"destinationGeoIP"` // can be nil if never queried, empty slice if got no result
+-	SrcIPASN     string     `json:"sourceIPASN"`
+-	DstIPASN     string     `json:"destinationIPASN"`
+-	SrcPort      uint16     `json:"sourcePort,string"`      // `,string` is used to compatible with old version json output
+-	DstPort      uint16     `json:"destinationPort,string"` // `,string` is used to compatible with old version json output
+-	InIP         netip.Addr `json:"inboundIP"`
+-	InPort       uint16     `json:"inboundPort,string"` // `,string` is used to compatible with old version json output
+-	InName       string     `json:"inboundName"`
+-	InUser       string     `json:"inboundUser"`
+-	RematchName  string     `json:"rematchName"`
+-	Host         string     `json:"host"`
+-	DNSMode      DNSMode    `json:"dnsMode"`
+-	Uid          uint32     `json:"uid"`
+-	Process      string     `json:"process"`
+-	ProcessPath  string     `json:"processPath"`
+-	SpecialProxy string     `json:"specialProxy"`
+-	SpecialRules string     `json:"specialRules"`
+-	RemoteDst    string     `json:"remoteDestination"`
+-	DSCP         uint8      `json:"dscp"`
+-	UUID           string     `json:"id,omitempty"` // ID is used to identify the connection for smart
+-	SmartBlock     string     `json:"smartBlock"`   // SmartBlock indicates if the node selected by smart group should be blocked for this connection
++	NetWork        NetWork    `json:"network"`
++	Type           Type       `json:"type"`
++	SrcIP          netip.Addr `json:"sourceIP"`
++	DstIP          netip.Addr `json:"destinationIP"`
++	SrcGeoIP       []string   `json:"sourceGeoIP"`      // can be nil if never queried, empty slice if got no result
++	DstGeoIP       []string   `json:"destinationGeoIP"` // can be nil if never queried, empty slice if got no result
++	SrcIPASN       string     `json:"sourceIPASN"`
++	DstIPASN       string     `json:"destinationIPASN"`
++	SrcPort        uint16     `json:"sourcePort,string"`      // `,string` is used to compatible with old version json output
++	DstPort        uint16     `json:"destinationPort,string"` // `,string` is used to compatible with old version json output
++	InIP           netip.Addr `json:"inboundIP"`
++	InPort         uint16     `json:"inboundPort,string"` // `,string` is used to compatible with old version json output
++	InName         string     `json:"inboundName"`
++	InUser         string     `json:"inboundUser"`
++	RematchName    string     `json:"rematchName"`
++	Host           string     `json:"host"`
++	DNSMode        DNSMode    `json:"dnsMode"`
++	Uid            uint32     `json:"uid"`
++	Process        string     `json:"process"`
++	ProcessPath    string     `json:"processPath"`
++	SpecialProxy   string     `json:"specialProxy"`
++	SpecialRules   string     `json:"specialRules"`
++	RemoteDst      string     `json:"remoteDestination"`
++	DSCP           uint8      `json:"dscp"`
++	UUID           string     `json:"id,omitempty"`   // ID is used to identify the connection for smart
++	SmartBlock     string     `json:"smartBlock"`     // SmartBlock indicates if the node selected by smart group should be blocked for this connection
+ 	SmartTarget    string     `json:"smartTarget"`    // SmartTarget indicates the target domain/ip for smart group node selection
+ 	WildcardTarget string     `json:"wildcardTarget"` // WildcardTarget caches GetEffectiveTarget result
+ 
+ 	RawSrcAddr net.Addr `json:"-"`
+ 	RawDstAddr net.Addr `json:"-"`
+ 	// Only domain rule
+ 	SniffHost string `json:"sniffHost"`
+diff --git a/listener/cns/packet.go b/listener/cns/packet.go
+new file mode 100644
+index 0000000..b1cc527
+--- /dev/null
++++ b/listener/cns/packet.go
+@@ -0,0 +1,35 @@
++package cns
++
++import (
++	"errors"
++	"net"
++)
++
++type packet struct {
++	pc      net.PacketConn
++	rAddr   net.Addr
++	payload []byte
++}
++
++func (c *packet) Data() []byte {
++	return c.payload
++}
++
++func (c *packet) WriteBack(b []byte, addr net.Addr) (n int, err error) {
++	if addr == nil {
++		return 0, errors.New("address is invalid")
++	}
++	return c.pc.WriteTo(b, addr)
++}
++
++func (c *packet) LocalAddr() net.Addr {
++	return c.rAddr
++}
++
++func (c *packet) Drop() {
++	c.payload = nil
++}
++
++func (c *packet) InAddr() net.Addr {
++	return c.pc.LocalAddr()
++}
+diff --git a/listener/cns/server.go b/listener/cns/server.go
+new file mode 100644
+index 0000000..650caf1
+--- /dev/null
++++ b/listener/cns/server.go
+@@ -0,0 +1,185 @@
++package cns
++
++import (
++	"bufio"
++	"context"
++	"net"
++	"strings"
++
++	"github.com/metacubex/mihomo/adapter/inbound"
++	N "github.com/metacubex/mihomo/common/net"
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/log"
++	"github.com/metacubex/mihomo/transport/cns"
++	"github.com/metacubex/mihomo/transport/socks5"
++)
++
++const (
++	defaultKey  = "Meng"
++	defaultFlag = "httpUDP"
++)
++
++var established = []byte("HTTP/1.1 200 Connection established\r\nServer: CuteBi Network Tunnel, (%>w<%)\r\nConnection: keep-alive\r\n\r\n")
++
++type Config struct {
++	Listen   string
++	Key      string
++	Password string
++	Flag     string
++	UDP      bool
++}
++
++type Listener struct {
++	listener net.Listener
++	addr     string
++	closed   bool
++	config   Config
++}
++
++func (l *Listener) RawAddress() string { return l.addr }
++func (l *Listener) Address() string    { return l.listener.Addr().String() }
++func (l *Listener) Close() error {
++	l.closed = true
++	return l.listener.Close()
++}
++
++func New(config Config, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
++	if len(additions) == 0 {
++		additions = []inbound.Addition{
++			inbound.WithInName("DEFAULT-CNS"),
++			inbound.WithSpecialRules(""),
++		}
++	}
++	if config.Key == "" {
++		config.Key = defaultKey
++	}
++	if config.Flag == "" {
++		config.Flag = defaultFlag
++	}
++
++	ln, err := lc.Listen(context.Background(), "tcp", config.Listen)
++	if err != nil {
++		return nil, err
++	}
++	l := &Listener{
++		listener: ln,
++		addr:     config.Listen,
++		config:   config,
++	}
++	go func() {
++		for {
++			conn, err := ln.Accept()
++			if err != nil {
++				if l.closed {
++					break
++				}
++				continue
++			}
++			go handleConn(conn, l.config, tunnel, additions...)
++		}
++	}()
++	return l, nil
++}
++
++func handleConn(conn net.Conn, config Config, tunnel C.Tunnel, additions ...inbound.Addition) {
++	if config.Key == "" {
++		config.Key = defaultKey
++	}
++	if config.Flag == "" {
++		config.Flag = defaultFlag
++	}
++
++	bufConn := N.NewBufferedConn(conn)
++	raw, err := readHTTPHeaders(bufConn.Reader())
++	if err != nil {
++		_ = conn.Close()
++		return
++	}
++
++	if _, err = conn.Write(established); err != nil {
++		_ = conn.Close()
++		return
++	}
++
++	if config.Flag != "" && strings.Contains(raw, config.Flag) {
++		handleUDP(bufConn, conn.RemoteAddr(), config.Password, tunnel, additions...)
++		return
++	}
++
++	host, err := headerValue(raw, config.Key)
++	if err != nil || host == "" {
++		log.Debugln("CNS inbound missing key header %q", config.Key)
++		_ = conn.Close()
++		return
++	}
++	host, err = cns.DecryptHost(host, config.Password)
++	if err != nil {
++		log.Debugln("CNS inbound decrypt host: %s", err)
++		_ = conn.Close()
++		return
++	}
++	if _, _, splitErr := net.SplitHostPort(host); splitErr != nil {
++		host = net.JoinHostPort(host, "80")
++	}
++	target := socks5.ParseAddr(host)
++	if target == nil {
++		log.Debugln("CNS inbound invalid target %q", host)
++		_ = conn.Close()
++		return
++	}
++
++	c := cns.NewCnsConn(bufConn, config.Password)
++	tunnel.HandleTCPConn(inbound.NewSocket(target, c, C.CNS, additions...))
++}
++
++func handleUDP(conn net.Conn, remote net.Addr, password string, tunnel C.Tunnel, additions ...inbound.Addition) {
++	pc := cns.NewUDPPacketConn(conn, password)
++	defer pc.Close()
++
++	buf := make([]byte, 65535)
++	for {
++		n, addr, err := pc.ReadFrom(buf)
++		if err != nil {
++			return
++		}
++		target := socks5.ParseAddrToSocksAddr(addr)
++		if target == nil {
++			continue
++		}
++		payload := append([]byte(nil), buf[:n]...)
++		pkt := &packet{pc: pc, rAddr: remote, payload: payload}
++		tunnel.HandleUDPPacket(inbound.NewPacket(target, pkt, C.CNS, additions...))
++	}
++}
++
++func readHTTPHeaders(r *bufio.Reader) (string, error) {
++	var b strings.Builder
++	for {
++		line, err := r.ReadString('\n')
++		if err != nil {
++			return "", err
++		}
++		b.WriteString(line)
++		if line == "\r\n" || line == "\n" {
++			break
++		}
++	}
++	return b.String(), nil
++}
++
++func headerValue(raw, key string) (string, error) {
++	prefix := strings.ToLower(key) + ":"
++	for _, line := range strings.Split(raw, "\n") {
++		line = strings.TrimRight(line, "\r")
++		if strings.HasPrefix(strings.ToLower(line), prefix) {
++			return strings.TrimSpace(line[len(key)+1:]), nil
++		}
++	}
++	return "", errMissingHeader
++}
++
++var errMissingHeader = errString("missing CNS key header")
++
++type errString string
++
++func (e errString) Error() string { return string(e) }
+diff --git a/listener/cns/server_test.go b/listener/cns/server_test.go
+new file mode 100644
+index 0000000..94c296f
+--- /dev/null
++++ b/listener/cns/server_test.go
+@@ -0,0 +1,156 @@
++package cns
++
++import (
++	"bufio"
++	"io"
++	"net"
++	"strings"
++	"testing"
++	"time"
++
++	C "github.com/metacubex/mihomo/constant"
++	tc "github.com/metacubex/mihomo/transport/cns"
++)
++
++type fakeTunnel struct {
++	gotHost string
++	gotData chan string
++	udpHost chan string
++	udpData chan string
++}
++
++func (f *fakeTunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
++	defer conn.Close()
++	if metadata != nil {
++		f.gotHost = metadata.RemoteAddress()
++	}
++	buf := make([]byte, 16)
++	n, _ := io.ReadFull(conn, buf[:5])
++	select {
++	case f.gotData <- string(buf[:n]):
++	default:
++	}
++}
++
++func (f *fakeTunnel) HandleUDPPacket(packet C.UDPPacket, metadata *C.Metadata) {
++	if metadata != nil {
++		select {
++		case f.udpHost <- metadata.RemoteAddress():
++		default:
++		}
++	}
++	if packet != nil {
++		select {
++		case f.udpData <- string(packet.Data()):
++		default:
++		}
++		packet.Drop()
++	}
++}
++
++func (f *fakeTunnel) NatTable() C.NatTable { return nil }
++
++func drainHTTP(t *testing.T, r *bufio.Reader) {
++	t.Helper()
++	for {
++		line, err := r.ReadString('\n')
++		if err != nil {
++			t.Fatal(err)
++		}
++		if line == "\r\n" {
++			return
++		}
++		if !strings.Contains(line, "200") && !strings.Contains(line, "CuteBi") && !strings.Contains(line, "keep-alive") && line != "\n" {
++			// still drain
++		}
++	}
++}
++
++func TestHandleConnTCPPayload(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	tunnel := &fakeTunnel{gotData: make(chan string, 1)}
++	go handleConn(serverRaw, Config{Key: "Meng", Password: "secret"}, tunnel)
++
++	host := tc.EncryptHost("example.com:443", "secret")
++	req := "CONNECT / HTTP/1.1\r\nMeng: " + host + "\r\nHost: cns.example\r\nConnection: keep-alive\r\n\r\n"
++	if _, err := clientRaw.Write([]byte(req)); err != nil {
++		t.Fatal(err)
++	}
++
++	_ = clientRaw.SetDeadline(time.Now().Add(2 * time.Second))
++	reader := bufio.NewReader(clientRaw)
++	drainHTTP(t, reader)
++
++	client := tc.NewCnsConn(clientRaw, "secret")
++	if _, err := client.Write([]byte("hello")); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case data := <-tunnel.gotData:
++		if data != "hello" {
++			t.Fatalf("payload = %q, want hello", data)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("timeout waiting for inbound payload")
++	}
++	if tunnel.gotHost != "example.com:443" {
++		t.Fatalf("target = %q", tunnel.gotHost)
++	}
++}
++
++func TestHandleConnUDPHandshake(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	tunnel := &fakeTunnel{
++		udpHost: make(chan string, 1),
++		udpData: make(chan string, 1),
++	}
++	go handleConn(serverRaw, Config{Key: "Meng", Password: "secret", Flag: "httpUDP"}, tunnel)
++
++	req := "CONNECT / HTTP/1.1\r\nhttpUDP\r\nHost: cns.example\r\nConnection: keep-alive\r\n\r\n"
++	if _, err := clientRaw.Write([]byte(req)); err != nil {
++		t.Fatal(err)
++	}
++
++	_ = clientRaw.SetDeadline(time.Now().Add(2 * time.Second))
++	reader := bufio.NewReader(clientRaw)
++	drainHTTP(t, reader)
++
++	// leftover in bufio.Reader is unused; writes go to the pipe.
++	pc := tc.NewUDPPacketConn(clientRaw, "secret")
++	dst := &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8), Port: 53}
++	if _, err := pc.WriteTo([]byte("query"), dst); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case host := <-tunnel.udpHost:
++		if host != "8.8.8.8:53" {
++			t.Fatalf("udp dest = %q", host)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("timeout waiting for UDP dest")
++	}
++	select {
++	case data := <-tunnel.udpData:
++		if data != "query" {
++			t.Fatalf("udp payload = %q", data)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("timeout waiting for UDP payload")
++	}
++}
++
++func TestHeaderValue(t *testing.T) {
++	raw := "CONNECT / HTTP/1.1\r\nMeng: abc\r\nHost: x\r\n\r\n"
++	got, err := headerValue(raw, "Meng")
++	if err != nil || got != "abc" {
++		t.Fatalf("got %q err %v", got, err)
++	}
++}
+diff --git a/listener/inbound/cns.go b/listener/inbound/cns.go
+new file mode 100644
+index 0000000..46b5360
+--- /dev/null
++++ b/listener/inbound/cns.go
+@@ -0,0 +1,86 @@
++package inbound
++
++import (
++	"errors"
++	"fmt"
++	"strings"
++
++	C "github.com/metacubex/mihomo/constant"
++	"github.com/metacubex/mihomo/listener/cns"
++	"github.com/metacubex/mihomo/log"
++)
++
++type CnsOption struct {
++	BaseOption
++	Key      string `inbound:"key,omitempty"`
++	Password string `inbound:"password,omitempty"`
++	Flag     string `inbound:"flag,omitempty"`
++	UDP      bool   `inbound:"udp,omitempty"`
++}
++
++func (o CnsOption) Equal(config C.InboundConfig) bool {
++	return optionToString(o) == optionToString(config)
++}
++
++type Cns struct {
++	*Base
++	config *CnsOption
++	l      []*cns.Listener
++}
++
++func NewCns(options *CnsOption) (*Cns, error) {
++	base, err := NewBase(&options.BaseOption)
++	if err != nil {
++		return nil, err
++	}
++	return &Cns{
++		Base:   base,
++		config: options,
++	}, nil
++}
++
++func (c *Cns) Config() C.InboundConfig {
++	return c.config
++}
++
++func (c *Cns) Address() string {
++	var addrList []string
++	for _, l := range c.l {
++		addrList = append(addrList, l.Address())
++	}
++	return strings.Join(addrList, ",")
++}
++
++func (c *Cns) Listen(tunnel C.Tunnel) error {
++	lc := c.ListenConfig()
++	for _, addr := range strings.Split(c.RawAddress(), ",") {
++		l, err := cns.New(cns.Config{
++			Listen:   addr,
++			Key:      c.config.Key,
++			Password: c.config.Password,
++			Flag:     c.config.Flag,
++			UDP:      c.config.UDP,
++		}, lc, tunnel, c.Additions()...)
++		if err != nil {
++			return err
++		}
++		c.l = append(c.l, l)
++	}
++	log.Infoln("CNS[%s] proxy listening at: %s", c.Name(), c.Address())
++	return nil
++}
++
++func (c *Cns) Close() error {
++	var errs []error
++	for _, l := range c.l {
++		if err := l.Close(); err != nil {
++			errs = append(errs, fmt.Errorf("close tcp listener %s err: %w", l.Address(), err))
++		}
++	}
++	if len(errs) > 0 {
++		return errors.Join(errs...)
++	}
++	return nil
++}
++
++var _ C.InboundListener = (*Cns)(nil)
+diff --git a/listener/parse.go b/listener/parse.go
+index c816a3c..8a3de6a 100644
+--- a/listener/parse.go
++++ b/listener/parse.go
+@@ -30,14 +30,21 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
+ 	case "http":
+ 		httpOption := &IN.HTTPOption{}
+ 		err = decoder.Decode(mapping, httpOption)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 		listener, err = IN.NewHTTP(httpOption)
++	case "cns":
++		cnsOption := &IN.CnsOption{}
++		err = decoder.Decode(mapping, cnsOption)
++		if err != nil {
++			return nil, err
++		}
++		listener, err = IN.NewCns(cnsOption)
+ 	case "tproxy":
+ 		tproxyOption := &IN.TProxyOption{UDP: true}
+ 		err = decoder.Decode(mapping, tproxyOption)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 		listener, err = IN.NewTProxy(tproxyOption)
+diff --git a/transport/cns/enc.go b/transport/cns/enc.go
+new file mode 100644
+index 0000000..6fffc1f
+--- /dev/null
++++ b/transport/cns/enc.go
+@@ -0,0 +1,58 @@
++package cns
++
++import (
++	"encoding/base64"
++	"errors"
++)
++
++// Xorcrypt applies the CNS stream cipher in place and returns the next key
++// position. CNS deliberately uses the same operation for encryption and
++// decryption.
++func Xorcrypt(data, password []byte, passwordSub int) int {
++	if len(password) == 0 {
++		return 0
++	}
++
++	passwordSub %= len(password)
++	for i := range data {
++		data[i] ^= password[passwordSub] | byte(passwordSub)
++		passwordSub++
++		if passwordSub == len(password) {
++			passwordSub = 0
++		}
++	}
++	return passwordSub
++}
++
++// EncryptHost encodes the target address for the CNS request header. The
++// trailing NUL is part of the protocol and is removed by the server after
++// decryption.
++func EncryptHost(host, password string) string {
++	if password == "" {
++		return host
++	}
++
++	data := append([]byte(host), 0)
++	Xorcrypt(data, []byte(password), 0)
++	return base64.StdEncoding.EncodeToString(data)
++}
++
++// DecryptHost reverses EncryptHost. The original CNS server rejects the
++// handshake when the trailing NUL is missing after XOR.
++func DecryptHost(encoded, password string) (string, error) {
++	if password == "" {
++		return encoded, nil
++	}
++	data, err := base64.StdEncoding.DecodeString(encoded)
++	if err != nil {
++		return "", err
++	}
++	if len(data) == 0 {
++		return "", errors.New("empty CNS host")
++	}
++	Xorcrypt(data, []byte(password), 0)
++	if data[len(data)-1] != 0 {
++		return "", errors.New("host decrypt failed")
++	}
++	return string(data[:len(data)-1]), nil
++}
+diff --git a/transport/cns/enc_test.go b/transport/cns/enc_test.go
+new file mode 100644
+index 0000000..0490e23
+--- /dev/null
++++ b/transport/cns/enc_test.go
+@@ -0,0 +1,60 @@
++package cns
++
++import (
++	"encoding/base64"
++	"testing"
++)
++
++func TestXorcryptKeepsStreamPosition(t *testing.T) {
++	password := []byte("key")
++	plain := []byte("CNS stream payload")
++	encrypted := append([]byte(nil), plain...)
++
++	sub := Xorcrypt(encrypted[:5], password, 0)
++	Xorcrypt(encrypted[5:], password, sub)
++	if string(encrypted) == string(plain) {
++		t.Fatal("ciphertext unexpectedly equals plaintext")
++	}
++
++	sub = Xorcrypt(encrypted[:2], password, 0)
++	sub = Xorcrypt(encrypted[2:11], password, sub)
++	Xorcrypt(encrypted[11:], password, sub)
++	if string(encrypted) != string(plain) {
++		t.Fatalf("round trip = %q, want %q", encrypted, plain)
++	}
++}
++
++func TestEncryptHost(t *testing.T) {
++	if got := EncryptHost("example.com:443", ""); got != "example.com:443" {
++		t.Fatalf("unencrypted host = %q", got)
++	}
++
++	const password = "key"
++	got := EncryptHost("example.com:443", password)
++	data, err := base64.StdEncoding.DecodeString(got)
++	if err != nil {
++		t.Fatal(err)
++	}
++	Xorcrypt(data, []byte(password), 0)
++	if want := "example.com:443\x00"; string(data) != want {
++		t.Fatalf("decoded host = %q, want %q", data, want)
++	}
++}
++
++func TestDecryptHostRoundTrip(t *testing.T) {
++	const host = "example.com:443"
++	got, err := DecryptHost(EncryptHost(host, "key"), "key")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got != host {
++		t.Fatalf("DecryptHost = %q, want %q", got, host)
++	}
++	got, err = DecryptHost(host, "")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got != host {
++		t.Fatalf("unencrypted DecryptHost = %q", got)
++	}
++}
+diff --git a/transport/cns/tcp.go b/transport/cns/tcp.go
+new file mode 100644
+index 0000000..f745895
+--- /dev/null
++++ b/transport/cns/tcp.go
+@@ -0,0 +1,70 @@
++package cns
++
++import (
++	"io"
++	"net"
++	"sync"
++)
++
++// CnsConn encrypts and decrypts a CNS TCP stream. Each direction has an
++// independent cipher position, as required by the CNS server.
++type CnsConn struct {
++	net.Conn
++	password []byte
++
++	readMu   sync.Mutex
++	readSub  int
++	writeMu  sync.Mutex
++	writeSub int
++}
++
++func NewCnsConn(conn net.Conn, password string) *CnsConn {
++	return &CnsConn{
++		Conn:     conn,
++		password: []byte(password),
++	}
++}
++
++func (c *CnsConn) Read(p []byte) (int, error) {
++	c.readMu.Lock()
++	defer c.readMu.Unlock()
++
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		c.readSub = Xorcrypt(p[:n], c.password, c.readSub)
++	}
++	return n, err
++}
++
++func (c *CnsConn) Write(p []byte) (int, error) {
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++
++	if len(p) == 0 {
++		return 0, nil
++	}
++
++	data := append([]byte(nil), p...)
++	nextSub := Xorcrypt(data, c.password, c.writeSub)
++	if err := writeFull(c.Conn, data); err != nil {
++		return 0, err
++	}
++	c.writeSub = nextSub
++	return len(p), nil
++}
++
++func writeFull(writer io.Writer, data []byte) error {
++	for len(data) > 0 {
++		n, err := writer.Write(data)
++		if n > 0 {
++			data = data[n:]
++		}
++		if err != nil {
++			return err
++		}
++		if n == 0 {
++			return io.ErrShortWrite
++		}
++	}
++	return nil
++}
+diff --git a/transport/cns/tcp_test.go b/transport/cns/tcp_test.go
+new file mode 100644
+index 0000000..39a3e25
+--- /dev/null
++++ b/transport/cns/tcp_test.go
+@@ -0,0 +1,70 @@
++package cns
++
++import (
++	"io"
++	"net"
++	"testing"
++)
++
++func TestCnsConnBidirectionalStream(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	const password = "secret"
++	client := NewCnsConn(clientRaw, password)
++	clientPayload := []byte("client payload split across cipher cycles")
++	serverPayload := []byte("server reply in differently sized writes")
++
++	serverErr := make(chan error, 1)
++	go func() {
++		received := make([]byte, len(clientPayload))
++		if _, err := io.ReadFull(serverRaw, received); err != nil {
++			serverErr <- err
++			return
++		}
++		Xorcrypt(received, []byte(password), 0)
++		if string(received) != string(clientPayload) {
++			serverErr <- &payloadMismatchError{got: string(received), want: string(clientPayload)}
++			return
++		}
++
++		encrypted := append([]byte(nil), serverPayload...)
++		Xorcrypt(encrypted, []byte(password), 0)
++		if _, err := serverRaw.Write(encrypted[:7]); err != nil {
++			serverErr <- err
++			return
++		}
++		if _, err := serverRaw.Write(encrypted[7:]); err != nil {
++			serverErr <- err
++			return
++		}
++		serverErr <- nil
++	}()
++
++	if _, err := client.Write(clientPayload[:9]); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := client.Write(clientPayload[9:]); err != nil {
++		t.Fatal(err)
++	}
++	received := make([]byte, len(serverPayload))
++	if _, err := io.ReadFull(client, received); err != nil {
++		t.Fatal(err)
++	}
++	if string(received) != string(serverPayload) {
++		t.Fatalf("reply = %q, want %q", received, serverPayload)
++	}
++	if err := <-serverErr; err != nil {
++		t.Fatal(err)
++	}
++}
++
++type payloadMismatchError struct {
++	got  string
++	want string
++}
++
++func (e *payloadMismatchError) Error() string {
++	return "payload mismatch: got " + e.got + ", want " + e.want
++}
+diff --git a/transport/cns/udp.go b/transport/cns/udp.go
+new file mode 100644
+index 0000000..72a54e4
+--- /dev/null
++++ b/transport/cns/udp.go
+@@ -0,0 +1,179 @@
++package cns
++
++import (
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"sync"
++	"time"
++)
++
++const (
++	cnsAtypIPv4 = 1
++	cnsAtypIPv6 = 3
++
++	cnsIPv4HeaderLen = 12
++	cnsIPv6HeaderLen = 24
++	cnsMaxFrameLen   = 1<<16 - 1
++)
++
++// OverTCPPacketConn carries CNS UDP packets over a single TCP connection.
++type OverTCPPacketConn struct {
++	conn     net.Conn
++	password []byte
++
++	readMu   sync.Mutex
++	readSub  int
++	writeMu  sync.Mutex
++	writeSub int
++}
++
++func NewUDPPacketConn(conn net.Conn, password string) *OverTCPPacketConn {
++	return &OverTCPPacketConn{
++		conn:     conn,
++		password: []byte(password),
++	}
++}
++
++func (c *OverTCPPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
++	c.readMu.Lock()
++	defer c.readMu.Unlock()
++
++	var lengthBytes [2]byte
++	if err := c.readAndDecrypt(lengthBytes[:]); err != nil {
++		return 0, nil, err
++	}
++
++	bodyLen := int(binary.LittleEndian.Uint16(lengthBytes[:]))
++	if bodyLen < cnsIPv4HeaderLen-2 {
++		return 0, nil, fmt.Errorf("invalid CNS UDP frame length: %d", bodyLen)
++	}
++	body := make([]byte, bodyLen)
++	if err := c.readAndDecrypt(body); err != nil {
++		return 0, nil, err
++	}
++
++	if body[0] != 0 || body[1] != 0 || body[2] != 0 {
++		return 0, nil, errors.New("invalid CNS UDP frame prefix")
++	}
++
++	var (
++		ip      net.IP
++		port    uint16
++		payload []byte
++	)
++	switch body[3] {
++	case cnsAtypIPv4:
++		if len(body) < cnsIPv4HeaderLen-2 {
++			return 0, nil, errors.New("short CNS IPv4 UDP frame")
++		}
++		ip = net.IP(append([]byte(nil), body[4:8]...))
++		port = binary.BigEndian.Uint16(body[8:10])
++		payload = body[10:]
++	case cnsAtypIPv6:
++		if len(body) < cnsIPv6HeaderLen-2 {
++			return 0, nil, errors.New("short CNS IPv6 UDP frame")
++		}
++		ip = net.IP(append([]byte(nil), body[4:20]...))
++		port = binary.BigEndian.Uint16(body[20:22])
++		payload = body[22:]
++	default:
++		return 0, nil, fmt.Errorf("unsupported CNS UDP address type: %d", body[3])
++	}
++
++	n := copy(p, payload)
++	return n, &net.UDPAddr{IP: ip, Port: int(port)}, nil
++}
++
++func (c *OverTCPPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
++	udpAddr, err := asUDPAddr(addr)
++	if err != nil {
++		return 0, err
++	}
++
++	var (
++		atyp      byte
++		ip        net.IP
++		headerLen int
++	)
++	if ipv4 := udpAddr.IP.To4(); ipv4 != nil {
++		atyp = cnsAtypIPv4
++		ip = ipv4
++		headerLen = cnsIPv4HeaderLen
++	} else if ipv6 := udpAddr.IP.To16(); ipv6 != nil {
++		atyp = cnsAtypIPv6
++		ip = ipv6
++		headerLen = cnsIPv6HeaderLen
++	} else {
++		return 0, errors.New("invalid CNS UDP destination IP")
++	}
++
++	frameLen := headerLen + len(p)
++	if frameLen-2 > cnsMaxFrameLen {
++		return 0, fmt.Errorf("CNS UDP packet too large: %d", len(p))
++	}
++	frame := make([]byte, frameLen)
++	binary.LittleEndian.PutUint16(frame[:2], uint16(frameLen-2))
++	frame[5] = atyp
++	copy(frame[6:], ip)
++	portOffset := 6 + len(ip)
++	binary.BigEndian.PutUint16(frame[portOffset:portOffset+2], uint16(udpAddr.Port))
++	copy(frame[headerLen:], p)
++
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++
++	nextSub := Xorcrypt(frame, c.password, c.writeSub)
++	if err := writeFull(c.conn, frame); err != nil {
++		return 0, err
++	}
++	c.writeSub = nextSub
++	return len(p), nil
++}
++
++func (c *OverTCPPacketConn) readAndDecrypt(data []byte) error {
++	if _, err := io.ReadFull(c.conn, data); err != nil {
++		return err
++	}
++	c.readSub = Xorcrypt(data, c.password, c.readSub)
++	return nil
++}
++
++func (c *OverTCPPacketConn) Close() error {
++	return c.conn.Close()
++}
++
++func (c *OverTCPPacketConn) LocalAddr() net.Addr {
++	return c.conn.LocalAddr()
++}
++
++func (c *OverTCPPacketConn) SetDeadline(t time.Time) error {
++	return c.conn.SetDeadline(t)
++}
++
++func (c *OverTCPPacketConn) SetReadDeadline(t time.Time) error {
++	return c.conn.SetReadDeadline(t)
++}
++
++func (c *OverTCPPacketConn) SetWriteDeadline(t time.Time) error {
++	return c.conn.SetWriteDeadline(t)
++}
++
++func asUDPAddr(addr net.Addr) (*net.UDPAddr, error) {
++	if addr == nil {
++		return nil, errors.New("nil CNS UDP destination")
++	}
++	if udpAddr, ok := addr.(*net.UDPAddr); ok {
++		if udpAddr.Port < 0 || udpAddr.Port > 65535 {
++			return nil, fmt.Errorf("invalid CNS UDP port: %d", udpAddr.Port)
++		}
++		return udpAddr, nil
++	}
++	udpAddr, err := net.ResolveUDPAddr("udp", addr.String())
++	if err != nil {
++		return nil, fmt.Errorf("resolve CNS UDP destination: %w", err)
++	}
++	return udpAddr, nil
++}
+diff --git a/transport/cns/udp_test.go b/transport/cns/udp_test.go
+new file mode 100644
+index 0000000..bf3497e
+--- /dev/null
++++ b/transport/cns/udp_test.go
+@@ -0,0 +1,71 @@
++package cns
++
++import (
++	"net"
++	"testing"
++)
++
++func TestUDPPacketConnIPv4AndIPv6(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	client := NewUDPPacketConn(clientRaw, "udp-password")
++	server := NewUDPPacketConn(serverRaw, "udp-password")
++
++	tests := []struct {
++		name    string
++		addr    *net.UDPAddr
++		payload []byte
++	}{
++		{
++			name:    "IPv4",
++			addr:    &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8), Port: 53},
++			payload: []byte("ipv4 dns payload"),
++		},
++		{
++			name:    "IPv6",
++			addr:    &net.UDPAddr{IP: net.ParseIP("2001:4860:4860::8888"), Port: 5353},
++			payload: []byte("ipv6 dns payload"),
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			writeResult := make(chan error, 1)
++			go func() {
++				_, err := client.WriteTo(test.payload, test.addr)
++				writeResult <- err
++			}()
++
++			buffer := make([]byte, 256)
++			n, addr, err := server.ReadFrom(buffer)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := <-writeResult; err != nil {
++				t.Fatal(err)
++			}
++			if string(buffer[:n]) != string(test.payload) {
++				t.Fatalf("payload = %q, want %q", buffer[:n], test.payload)
++			}
++
++			got := addr.(*net.UDPAddr)
++			if !got.IP.Equal(test.addr.IP) || got.Port != test.addr.Port {
++				t.Fatalf("address = %s, want %s", got, test.addr)
++			}
++		})
++	}
++}
++
++func TestUDPPacketConnRejectsOversizedPacket(t *testing.T) {
++	clientRaw, serverRaw := net.Pipe()
++	defer clientRaw.Close()
++	defer serverRaw.Close()
++
++	conn := NewUDPPacketConn(clientRaw, "")
++	payload := make([]byte, cnsMaxFrameLen)
++	if _, err := conn.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(1, 1, 1, 1), Port: 53}); err == nil {
++		t.Fatal("oversized packet was accepted")
++	}
++}
+-- 
+2.47.3
+
