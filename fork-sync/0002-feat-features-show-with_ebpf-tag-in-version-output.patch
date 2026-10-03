@@ -1,0 +1,55 @@
+From 4644b52ddff63c99e362abd6a50d262292cd26fa Mon Sep 17 00:00:00 2001
+From: with-at-porter <with-at@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 01:28:56 +0000
+Subject: [PATCH 2/5] feat(features): show with_ebpf tag in version output
+
+---
+ constant/features/tags.go           | 3 +++
+ constant/features/with_ebpf.go      | 5 +++++
+ constant/features/with_ebpf_stub.go | 5 +++++
+ 3 files changed, 13 insertions(+)
+ create mode 100644 constant/features/with_ebpf.go
+ create mode 100644 constant/features/with_ebpf_stub.go
+
+diff --git a/constant/features/tags.go b/constant/features/tags.go
+index bf27c24..3af7086 100644
+--- a/constant/features/tags.go
++++ b/constant/features/tags.go
+@@ -18,9 +18,12 @@ func Tags() (tags []string) {
+ 	}
+ 	if NoEasyTier {
+ 		tags = append(tags, "no_easytier")
+ 	}
+ 	if WithGVisor {
+ 		tags = append(tags, "with_gvisor")
+ 	}
++	if WithEBPF {
++		tags = append(tags, "with_ebpf")
++	}
+ 	return
+ }
+diff --git a/constant/features/with_ebpf.go b/constant/features/with_ebpf.go
+new file mode 100644
+index 0000000..563e26c
+--- /dev/null
++++ b/constant/features/with_ebpf.go
+@@ -0,0 +1,5 @@
++//go:build with_ebpf
++
++package features
++
++const WithEBPF = true
+diff --git a/constant/features/with_ebpf_stub.go b/constant/features/with_ebpf_stub.go
+new file mode 100644
+index 0000000..a3bc838
+--- /dev/null
++++ b/constant/features/with_ebpf_stub.go
+@@ -0,0 +1,5 @@
++//go:build !with_ebpf
++
++package features
++
++const WithEBPF = false
+-- 
+2.47.3
+

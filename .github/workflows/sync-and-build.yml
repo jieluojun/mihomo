@@ -1,0 +1,153 @@
+# 放到 fork 默认分支 Alpha 的 .github/workflows/sync-and-build.yml
+# 功能: 同步上游 Alpha → 重新 git am 补丁 → 编译 eBPF 版 → 发布滚动 Release
+#
+# 只保留一条 Alpha 分支（不再维护 with-at）。补丁文件在同仓库 fork-sync/。
+# 每次运行先把 fork-sync/ 和工作流拷到 /tmp，再 reset --hard 上游，然后 am。
+#
+# 产物命名与压缩方式和上游 build.yml 一致:
+#   mihomo-linux-arm64-<VERSION>.gz
+#   mihomo-android-arm64-v8-<VERSION>.gz
+#   mihomo-android-armv7-<VERSION>.gz
+#
+# 前提: 仓库 Settings -> Actions -> General -> Workflow permissions 设为
+#       "Read and write permissions"
+
+name: sync-upstream-and-build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *" # 每天 20:00 UTC = 北京时间 04:00
+
+# GITHUB_TOKEN 不能创建/更新 .github/workflows/*（上游 Alpha 自带 test.yml）。
+# 在仓库 Settings → Secrets → Actions 添加 SYNC_PAT：
+#   经典 PAT，勾选 repo + workflow。
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: https://github.com/liuran001/mihomo.git
+  UPSTREAM_BRANCH: Alpha
+  WORKFLOW_PATH: .github/workflows/sync-and-build.yml
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Alpha
+        uses: actions/checkout@v4
+        with:
+          ref: Alpha
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT }}
+
+      - name: Reset to upstream and re-apply patches
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM" || true
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+          # reset 会清掉工作区：拷走整个 fork-sync/（含 sync.sh、README、补丁）和工作流
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cp -a fork-sync "$tmp/fork-sync"
+          cp -a "$WORKFLOW_PATH" "$tmp/workflow.yml"
+
+          git checkout -B "$UPSTREAM_BRANCH"
+          git reset --hard "upstream/$UPSTREAM_BRANCH"
+
+          mkdir -p .github/workflows
+          rm -rf fork-sync
+          cp -a "$tmp/fork-sync" fork-sync
+          cp "$tmp/workflow.yml" "$WORKFLOW_PATH"
+          git add "$WORKFLOW_PATH" fork-sync
+          git diff --cached --quiet || git commit -m "ci: keep sync workflow and patch series on Alpha"
+
+          git am --3way fork-sync/[0-9][0-9][0-9][0-9]-*.patch
+          git push -f origin "$UPSTREAM_BRANCH"
+
+      # 与上游 liuran001/mihomo Alpha 的 build.yml 相同：官方 setup-go@v5
+      # 没有 go-download-base-url，要用带该参数的 commit（MetaCubeX 的 Go 1.26）。
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26'
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+
+      - name: Sanity test
+        run: |
+          go test ./adapter/outbound/ -run 'TestHttpConnectLine|TestCnsRequestHeader' -v
+
+      # android/arm 不能 CGO_ENABLED=0（Go: "android/arm requires external (cgo) linking"）。
+      # arm64 仍纯 Go；仅 32 位走 NDK clang，与上游 build.yml 一致。
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Build eBPF binaries
+        run: |
+          set -e
+          VERSION="alpha-smart-$(git rev-parse --short HEAD)-with-at"
+          BUILDTIME="$(date -u)"
+          LD="-X \"github.com/metacubex/mihomo/constant.Version=$VERSION\" -X \"github.com/metacubex/mihomo/constant.BuildTime=$BUILDTIME\" -w -s -buildid="
+          GOARCH=arm64 GOOS=linux   CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-linux-arm64 .
+          GOARCH=arm64 GOOS=android CGO_ENABLED=0 go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-android-arm64-v8 .
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi34-clang" \
+            CGO_ENABLED=1 GOARCH=arm GOARM=7 GOOS=android \
+            go build -tags "with_gvisor with_ebpf" -trimpath -ldflags "$LD" -o mihomo-android-armv7 .
+          gzip -c mihomo-linux-arm64      > "mihomo-linux-arm64-${VERSION}.gz"
+          gzip -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+          gzip -c mihomo-android-armv7    > "mihomo-android-armv7-${VERSION}.gz"
+          echo "$VERSION" > version.txt
+
+      - name: Clean stale assets from rolling release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_json="$(mktemp)"
+          trap 'rm -f "$release_json"' EXIT
+          status="$(curl -sS -o "$release_json" -w "%{http_code}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/with-at-latest")"
+          echo "release lookup -> HTTP $status"
+          if [[ "$status" == "404" ]]; then
+            echo "rolling release does not exist yet; nothing to clean"
+            exit 0
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "release lookup failed (HTTP $status)" >&2
+            cat "$release_json" >&2
+            exit 1
+          fi
+          ids="$(jq -r '.assets[]?.id' "$release_json")"
+          for id in $ids; do
+            status="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$id")"
+            echo "delete asset id=$id -> HTTP $status"
+            if [[ "$status" != "204" ]]; then
+              echo "failed to delete release asset $id (HTTP $status)" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: with-at-latest
+          name: "With-At eBPF build"
+          body: "自动构建:上游 liuran001/mihomo@Alpha + With-At 补丁（每次同步重新 git am）。内核特性见 https://raw.githubusercontent.com/jieluojun/mihomo/refs/heads/Alpha/fork-sync/README.md"
+          files: |
+            mihomo-linux-arm64-*.gz
+            mihomo-android-arm64-v8-*.gz
+            mihomo-android-armv7-*.gz
+            version.txt
+          make_latest: true
