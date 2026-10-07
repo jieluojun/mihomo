@@ -11,6 +11,36 @@ import (
 
 func boolPtr(v bool) *bool { return &v }
 
+func TestSharedIgnoresDisabledLocalTemplate(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		options := LC.EBPF{Mode: "shared", Local: LC.EBPFLocal{
+			DNSMode: "invalid", DataPlane: "invalid", CgroupPath: "relative",
+			IPv6Mode: "invalid", StateCapacity: maximumStateCapacity + 1,
+			BypassPortRange: []string{"invalid"}, IncludeUIDRange: []string{"invalid"},
+			IncludePackage: []string{"android-only"}, BypassRuleSet: []string{"missing"},
+		}}
+		if explicit {
+			options.Mode = ""
+			options.Local.Enable = boolPtr(false)
+			options.Shared.Enable = boolPtr(true)
+		}
+		normalized, notes, err := applyLegacyOptions(options)
+		if err != nil || len(notes) != 0 {
+			t.Fatalf("disabled template validated: %v, %v", err, notes)
+		}
+		if !reflect.DeepEqual(normalized.Local, LC.EBPFLocal{Enabled: normalized.Local.Enabled}) {
+			t.Fatalf("disabled local retained: %+v", normalized.Local)
+		}
+		selection, err := normalizeDataPlanes(normalized)
+		if err != nil || selection.localEnabled || !selection.sharedEnabled {
+			t.Fatalf("selection=%+v, %v", selection, err)
+		}
+	}
+	if _, _, err := applyLegacyOptions(LC.EBPF{Mode: "local", Local: LC.EBPFLocal{IPv6Mode: "invalid"}}); err == nil {
+		t.Fatal("enabled local scope stopped validating legacy options")
+	}
+}
+
 func TestEnablementModeLocal(t *testing.T) {
 	// mode: local only -> local enabled, shared disabled
 	sel, err := normalizeDataPlanes(LC.EBPF{Mode: "local"})

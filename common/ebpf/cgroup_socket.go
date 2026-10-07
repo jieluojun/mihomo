@@ -400,14 +400,10 @@ func (b *CgroupBackend) takeMapElement(mapFD int, key unsafe.Pointer, value unsa
 		}
 		b.lookupAndDeleteMode.Store(mapLookupAndDeleteUnsupported)
 	}
-	if err := lookupMap(mapFD, key, value); err != nil {
-		return err
-	}
-	err := deleteMap(mapFD, key)
-	if errors.Is(err, unix.ENOENT) {
-		return nil
-	}
-	return err
+	// Two syscalls cannot emulate atomic lookup-and-delete: a kernel update
+	// between them would be deleted as well. Keep the bounded LRU entry on
+	// older kernels; socket cleanup or eviction will eventually reclaim it.
+	return lookupMap(mapFD, key, value)
 }
 
 func mapLookupAndDeleteUnavailable(err error) bool {

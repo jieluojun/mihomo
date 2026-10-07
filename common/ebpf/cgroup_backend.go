@@ -82,7 +82,8 @@ type cgroupRuntime struct {
 
 	// displaced holds, per slot, the program another owner had attached
 	// exclusively and the exclusive fallback replaced; detach puts it back.
-	displaced [cgroupProgramCount]*CiliumEBPF.Program
+	displaced    [cgroupProgramCount]*displacedCgroupOwner
+	attach_modes [cgroupProgramCount]string
 }
 
 type CgroupBackend struct {

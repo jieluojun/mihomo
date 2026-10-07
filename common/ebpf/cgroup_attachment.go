@@ -4,8 +4,10 @@ package ebpf
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"unsafe"
 
 	E "github.com/metacubex/sing/common/exceptions"
 
@@ -13,6 +15,89 @@ import (
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
+
+type cgroupProgramLink interface {
+	Close() error
+}
+
+type retryableCgroupProgramLink interface {
+	cgroupProgramLink
+	IsClosed() bool
+}
+
+// cgroupProgramLinkCloseComplete distinguishes a failed legacy detach, whose
+// target FD must be retained for another attempt, from link.Close errors where
+// the link FD has already been consumed and cannot be retried safely.
+func cgroupProgramLinkCloseComplete(programLink cgroupProgramLink, closeErr error) bool {
+	if closeErr == nil {
+		return true
+	}
+	retryableLink, retryable := programLink.(retryableCgroupProgramLink)
+	return !retryable || retryableLink.IsClosed()
+}
+
+// attachCgroupProgram prefers BPF_LINK_CREATE, whose cgroup implementation is
+// inherently multi-program, then falls back to legacy BPF_PROG_ATTACH. The
+// legacy path tries BPF_F_ALLOW_MULTI first and retries without flags only when
+// the kernel rejects multi attachment with a compatibility error.
+func attachCgroupProgram(path string, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) (cgroupProgramLink, error) {
+	cgroupFile, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	programLink, linkErr := link.AttachRawLink(link.RawLinkOptions{
+		Target:  int(cgroupFile.Fd()),
+		Program: program,
+		Attach:  attachType,
+	})
+	if linkErr == nil {
+		_ = cgroupFile.Close()
+		return programLink, nil
+	}
+	if !cgroupLinkUnavailable(linkErr) {
+		_ = cgroupFile.Close()
+		return nil, linkErr
+	}
+	if err = attachProgramRaw(int(cgroupFile.Fd()), program, attachType); err != nil {
+		_ = cgroupFile.Close()
+		return nil, E.Errors(linkErr, err)
+	}
+	return &legacyCgroupProgramLink{
+		cgroupFile: cgroupFile,
+		program:    program,
+		attachType: attachType,
+	}, nil
+}
+
+type legacyCgroupProgramLink struct {
+	cgroupFile *os.File
+	program    *CiliumEBPF.Program
+	attachType CiliumEBPF.AttachType
+	// detachProgram is nil in production. Tests inject a transient detach
+	// failure to prove that the target FD remains owned for a cleanup retry.
+	detachProgram func(int, *CiliumEBPF.Program, CiliumEBPF.AttachType) error
+}
+
+func (l *legacyCgroupProgramLink) Close() error {
+	if l == nil || l.cgroupFile == nil {
+		return nil
+	}
+	detachProgram := l.detachProgram
+	if detachProgram == nil {
+		detachProgram = rawDetachProgram
+	}
+	detachErr := detachProgram(int(l.cgroupFile.Fd()), l.program, l.attachType)
+	if detachErr != nil && !errors.Is(detachErr, unix.ENOENT) && !errors.Is(detachErr, unix.ESRCH) {
+		return detachErr
+	}
+	closeErr := l.cgroupFile.Close()
+	l.cgroupFile = nil
+	return closeErr
+}
+
+func (l *legacyCgroupProgramLink) IsClosed() bool {
+	return l == nil || l.cgroupFile == nil
+}
 
 // lockCgroupFile takes the exclusive lock that marks this cgroup as managed
 // here.
@@ -39,46 +124,81 @@ func lockCgroupFile(cgroupFile *os.File) error {
 
 func detachOwnedCgroupPrograms(cgroupFD int) error {
 	for _, definition := range cgroupProgramDefinitions {
-		first, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
-		if err != nil {
+		if _, err := detachOwnedCgroupProgramsForAttach(cgroupFD, definition.attachType); err != nil {
 			if definition.attachType == CiliumEBPF.AttachCgroupInetSockRelease && socketReleaseUnavailable(err) {
 				continue
 			}
 			return err
 		}
-		second, err := queryCgroupProgramIDs(cgroupFD, definition.attachType)
-		if err != nil {
-			return err
-		}
-		if !sameProgramIDs(first, second) {
-			return unix.ESTALE
-		}
-		for _, programID := range first {
-			program, openErr := CiliumEBPF.NewProgramFromID(programID)
-			if openErr != nil {
-				return openErr
-			}
-			info, infoErr := program.Info()
-			if infoErr != nil {
-				_ = program.Close()
-				return infoErr
-			}
-			if strings.HasPrefix(info.Name, "sb_ebpf_") {
-				if detachErr := rawDetachProgram(cgroupFD, program, definition.attachType); detachErr != nil {
-					_ = program.Close()
-					return detachErr
-				}
-			}
-			if closeErr := program.Close(); closeErr != nil {
-				return closeErr
-			}
-		}
 	}
 	return nil
 }
 
+// detachOwnedCgroupProgramsForAttach removes only programs that belong to a
+// sing-ebpf generation. Older releases used the sing_ebpf_ prefix, while the
+// current diagnostic names use sb_ebpf_. Never detach an unknown owner: the
+// caller may be sharing the host cgroup with netd or another eBPF service.
+func detachOwnedCgroupProgramsForAttach(cgroupFD int, attachType CiliumEBPF.AttachType) (bool, error) {
+	first, err := queryCgroupProgramIDs(cgroupFD, attachType)
+	if err != nil {
+		return false, err
+	}
+	second, err := queryCgroupProgramIDs(cgroupFD, attachType)
+	if err != nil {
+		return false, err
+	}
+	if !sameProgramIDs(first, second) {
+		return false, unix.ESTALE
+	}
+	var detached bool
+	for _, programID := range first {
+		name, nameErr := programNameByID(programID)
+		if nameErr != nil {
+			return detached, nameErr
+		}
+		if ownedCgroupProgramName(name) {
+			program, openErr := newProgramFromID(programID)
+			if openErr != nil {
+				return detached, openErr
+			}
+			// A stale program that is the hook's only program may have taken the
+			// hook over from Android netd and never given it back. Put a netd
+			// placeholder back instead of emptying the hook; the interception
+			// backend takes it over again when it attaches and restores it on
+			// detach.
+			if len(first) == 1 {
+				restored, restoreErr := restoreNetdOwnerForStaleProgram(cgroupFD, attachType)
+				if restoreErr != nil {
+					_ = program.Close()
+					return detached, restoreErr
+				}
+				if restored {
+					detached = true
+					if closeErr := program.Close(); closeErr != nil {
+						return detached, closeErr
+					}
+					continue
+				}
+			}
+			if detachErr := rawDetachProgram(cgroupFD, program, attachType); detachErr != nil {
+				_ = program.Close()
+				return detached, detachErr
+			}
+			detached = true
+			if closeErr := program.Close(); closeErr != nil {
+				return detached, closeErr
+			}
+		}
+	}
+	return detached, nil
+}
+
+func ownedCgroupProgramName(name string) bool {
+	return strings.HasPrefix(name, "sb_ebpf_") || strings.HasPrefix(name, "sing_ebpf_")
+}
+
 func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]CiliumEBPF.ProgramID, error) {
-	result, err := link.QueryPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
+	result, err := queryCgroupPrograms(link.QueryOptions{Target: cgroupFD, Attach: attachType})
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +207,76 @@ func queryCgroupProgramIDs(cgroupFD int, attachType CiliumEBPF.AttachType) ([]Ci
 		ids[index] = result.Programs[index].ID
 	}
 	return ids, nil
+}
+
+// cgroupProgQueryAttr is the BPF_PROG_QUERY member of union bpf_attr, through
+// query.revision. It must not be shortened: Linux 6.17 and 6.18 write
+// query.revision back to offset 56 whatever attribute size the caller passes,
+// so a shorter attribute lets the kernel write past it (fixed upstream by
+// "bpf: fix BPF_PROG_QUERY OOB write and cgroup backward compat"). The layout
+// matches cilium/ebpf's sys.ProgQueryAttr.
+type cgroupProgQueryAttr struct {
+	targetFD           uint32
+	attachType         uint32
+	queryFlags         uint32
+	attachFlags        uint32
+	programIDs         uint64
+	programs           uint32
+	_                  uint32
+	programAttachFlags uint64
+	linkIDs            uint64
+	linkAttachFlags    uint64
+	revision           uint64
+}
+
+// queryCgroupHookFlags returns the attach mode the kernel recorded for a
+// cgroup hook (0, BPF_F_ALLOW_OVERRIDE or BPF_F_ALLOW_MULTI). cilium/ebpf's
+// QueryPrograms does not expose this field, so the request is issued directly;
+// with prog_cnt = 0 every kernel since BPF_PROG_QUERY was introduced returns
+// only the count and the flags.
+var queryCgroupHookFlags = func(cgroupFD int, attachType CiliumEBPF.AttachType) (uint32, error) {
+	attr := cgroupProgQueryAttr{
+		targetFD:   uint32(cgroupFD),
+		attachType: uint32(attachType),
+	}
+	_, _, errno := unix.Syscall(unix.SYS_BPF, unix.BPF_PROG_QUERY, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	if errno != 0 {
+		return 0, errno
+	}
+	return attr.attachFlags, nil
+}
+
+var newProgramFromID = CiliumEBPF.NewProgramFromID
+
+var programNameByID = func(programID CiliumEBPF.ProgramID) (string, error) {
+	program, err := newProgramFromID(programID)
+	if err != nil {
+		return "", err
+	}
+	info, infoErr := program.Info()
+	closeErr := program.Close()
+	if infoErr != nil {
+		return "", infoErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return info.Name, nil
+}
+
+func cgroupProgramOwnerNames(result *link.QueryResult) ([]string, error) {
+	owners := make([]string, 0, len(result.Programs))
+	for _, attached := range result.Programs {
+		name, err := programNameByID(attached.ID)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" {
+			name = fmt.Sprintf("program-%d", attached.ID)
+		}
+		owners = append(owners, name)
+	}
+	return owners, nil
 }
 
 func (b *CgroupBackend) Attach() error {
@@ -120,19 +310,25 @@ func (b *CgroupBackend) Attach() error {
 		})
 		if err == nil {
 			b.runtime.links[slot] = programLink
+			b.runtime.attach_modes[slot] = cgroupAttachModeLinkCreate
 		} else if cgroupLinkUnavailable(err) {
-			b.runtime.displaced[slot], err = attachCgroupProgramRaw(cgroupFD, program, cgroupProgramDefinitions[slot].attachType)
+			var attachment legacyCgroupAttachment
+			attachment, err = attachProgramRawWithMode(cgroupFD, program, cgroupProgramDefinitions[slot].attachType, true)
+			if err == nil {
+				b.runtime.attach_modes[slot] = attachment.mode
+				b.runtime.displaced[slot] = attachment.displaced
+			}
 		}
 		if err != nil {
 			_ = b.detachProgramsLocked()
-			return eBPFBackendOperationError("attach eBPF inbound", cgroupProgramDefinitions[slot].name, err)
+			return eBPFBackendOperationError("attach eBPF cgroup programs", cgroupProgramDefinitions[slot].name, err)
 		}
 		b.runtime.attached[slot] = true
 	}
 	if b.runtime.enable_udp && b.runtime.socket_release_supported &&
 		!b.runtime.attached[cgroupProgramSocketRelease] {
 		_ = b.detachProgramsLocked()
-		return eBPFOperationError("attach eBPF inbound UDP cleanup", unix.EINVAL)
+		return eBPFOperationError("attach eBPF cgroup UDP cleanup", unix.EINVAL)
 	}
 	return nil
 }
@@ -161,82 +357,29 @@ func (b *CgroupBackend) detachProgramsLocked() error {
 			err = programLink.Close()
 			b.runtime.links[slot] = nil
 			b.runtime.attached[slot] = false
+			b.runtime.attach_modes[slot] = ""
 			if err != nil {
 				detachErr = E.Errors(detachErr, err)
 			}
 			continue
 		} else if displaced := b.runtime.displaced[slot]; displaced != nil {
-			err = restoreDisplacedCgroupProgram(cgroupFD, b.runtime.programs[slot], displaced, cgroupProgramDefinitions[slot].attachType)
+			// Put the netd placeholder back in place of our program. A
+			// failure keeps the displaced owner for a cleanup retry.
+			err = restoreDisplacedCgroupOwner(cgroupFD, b.runtime.programs[slot], displaced, cgroupProgramDefinitions[slot].attachType)
+			if err == nil {
+				b.runtime.displaced[slot] = nil
+			}
 		} else {
 			err = rawDetachProgram(cgroupFD, b.runtime.programs[slot], cgroupProgramDefinitions[slot].attachType)
 		}
 		if err == nil || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
 			b.runtime.attached[slot] = false
-			if displaced := b.runtime.displaced[slot]; displaced != nil {
-				_ = displaced.Close()
-				b.runtime.displaced[slot] = nil
-			}
+			b.runtime.attach_modes[slot] = ""
 			continue
 		}
 		detachErr = E.Errors(detachErr, err)
 	}
 	return detachErr
-}
-
-// attachCgroupProgramRaw attaches program next to whatever holds the hook and,
-// failing that, in its place. It is the fallback for kernels that refuse
-// BPF_LINK_CREATE, and the in-place attach replaces a program another owner
-// attached exclusively: on Android 15 and later netd holds connect, sendmsg and
-// recvmsg on the cgroup v2 root that way, and nothing else can attach there
-// alongside it. Detaching ours afterwards used to leave that hook empty until
-// its owner attached again, typically at the next boot. So before replacing,
-// this takes a reference to the program being displaced and returns it, and
-// detach puts it back. If the reference cannot be taken, the attach goes ahead
-// as it did before, only without the restore.
-func attachCgroupProgramRaw(cgroupFD int, program *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) (*CiliumEBPF.Program, error) {
-	err := link.RawAttachProgram(link.RawAttachProgramOptions{
-		Target:  cgroupFD,
-		Program: program,
-		Attach:  attachType,
-		Flags:   unix.BPF_F_ALLOW_MULTI,
-	})
-	if err == nil {
-		return nil, nil
-	}
-	var displaced *CiliumEBPF.Program
-	// An exclusive attachment is the only kind the in-place attach can replace,
-	// and it holds exactly one program.
-	if ids, queryErr := queryCgroupProgramIDs(cgroupFD, attachType); queryErr == nil && len(ids) == 1 {
-		displaced, _ = CiliumEBPF.NewProgramFromID(ids[0])
-	}
-	err = link.RawAttachProgram(link.RawAttachProgramOptions{
-		Target:  cgroupFD,
-		Program: program,
-		Attach:  attachType,
-	})
-	if err != nil {
-		if displaced != nil {
-			_ = displaced.Close()
-		}
-		return nil, err
-	}
-	return displaced, nil
-}
-
-// restoreDisplacedCgroupProgram hands the hook back to the program ours
-// displaced. Attaching it exclusively replaces ours in one step, so the hook is
-// never left empty in between. If the kernel refuses, ours is detached anyway:
-// the hook ends up empty, which is what detaching did before the restore
-// existed.
-func restoreDisplacedCgroupProgram(cgroupFD int, program, displaced *CiliumEBPF.Program, attachType CiliumEBPF.AttachType) error {
-	if err := link.RawAttachProgram(link.RawAttachProgramOptions{
-		Target:  cgroupFD,
-		Program: displaced,
-		Attach:  attachType,
-	}); err == nil {
-		return nil
-	}
-	return rawDetachProgram(cgroupFD, program, attachType)
 }
 
 // DisplacedHooks names the hooks where attaching replaced a program another
@@ -257,10 +400,20 @@ func (b *CgroupBackend) DisplacedHooks() []string {
 			continue
 		}
 		name := "unnamed"
-		if info, err := displaced.Info(); err == nil && info.Name != "" {
+		if info, err := displaced.program.Info(); err == nil && info.Name != "" {
 			name = info.Name
 		}
 		hooks = append(hooks, cgroupProgramDefinitions[slot].attachType.String()+" ("+name+")")
 	}
 	return hooks
+}
+
+func lenOpenCgroupProgramLinks(links []cgroupProgramLink) int {
+	count := 0
+	for _, l := range links {
+		if l != nil {
+			count++
+		}
+	}
+	return count
 }

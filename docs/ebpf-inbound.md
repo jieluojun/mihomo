@@ -146,8 +146,8 @@ Field behavior:
   explicit `local.enable` / `shared.enable` booleans are accepted instead of
   `mode`, not together with it: set either, and a role left unset is off; set
   neither, and only local runs. `local.enabled` / `shared.enabled` is an older
-  spelling of the same key. When shared interception is disabled (including
-  `mode: local`), shared settings other than the enablement selector are ignored.
+  spelling of the same key. When a scope is disabled, its settings other than
+  the enablement selector are ignored, including during rule-set updates.
 - `network`: `tcp`, `udp`, or both. Defaults to both when omitted.
 - `udp-timeout`: UDP session timeout in seconds. Defaults to 300, floor 5.
 - `tc-priority`: priority of the TC filters. With the default `1` the inbound

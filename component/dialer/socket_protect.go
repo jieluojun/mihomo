@@ -2,6 +2,8 @@ package dialer
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -15,18 +17,60 @@ type protectFn = func(ctx context.Context, network, address string, c syscall.Ra
 // bind/mark/TFO controls.
 var DefaultSocketProtect atomic.Value // holds protectFn or nil
 
-// RegisterSocketProtectFunc installs a socket-protect function. Pass nil to
-// disable. The previous function is replaced, not chained.
-func RegisterSocketProtectFunc(fn protectFn) {
+var socketProtectRegistry struct {
+	sync.Mutex
+	next  uint64
+	hooks map[uint64]protectFn
+}
+
+// RegisterSocketProtectFunc adds one owner and returns an idempotent cleanup.
+// Every active inbound must register the socket in its own bypass map.
+func RegisterSocketProtectFunc(fn protectFn) func() {
 	if fn == nil {
-		UnregisterSocketProtectFunc()
-		return
+		return func() {}
+	}
+	socketProtectRegistry.Lock()
+	socketProtectRegistry.next++
+	id := socketProtectRegistry.next
+	if socketProtectRegistry.hooks == nil {
+		socketProtectRegistry.hooks = make(map[uint64]protectFn)
+	}
+	socketProtectRegistry.hooks[id] = fn
+	publishSocketProtectLocked()
+	socketProtectRegistry.Unlock()
+	return sync.OnceFunc(func() {
+		socketProtectRegistry.Lock()
+		defer socketProtectRegistry.Unlock()
+		delete(socketProtectRegistry.hooks, id)
+		publishSocketProtectLocked()
+	})
+}
+
+func publishSocketProtectLocked() {
+	hooks := make([]protectFn, 0, len(socketProtectRegistry.hooks))
+	for _, hook := range socketProtectRegistry.hooks {
+		hooks = append(hooks, hook)
+	}
+	var fn protectFn
+	if len(hooks) == 1 {
+		fn = hooks[0]
+	} else if len(hooks) > 1 {
+		fn = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+			var err error
+			for _, hook := range hooks {
+				err = errors.Join(err, hook(ctx, network, address, c))
+			}
+			return err
+		}
 	}
 	DefaultSocketProtect.Store(fn)
 }
 
 // UnregisterSocketProtectFunc removes the active socket-protect function.
 func UnregisterSocketProtectFunc() {
+	socketProtectRegistry.Lock()
+	defer socketProtectRegistry.Unlock()
+	clear(socketProtectRegistry.hooks)
 	DefaultSocketProtect.Store((protectFn)(nil))
 }
 

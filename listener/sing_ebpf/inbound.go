@@ -164,7 +164,8 @@ type Inbound struct {
 	bypassPublisher    *resolver.EBPFBypassPublisher
 	dnsBypassSet       *netipx.IPSet
 
-	protectRegistered bool
+	protectRegistered       bool
+	unregisterSocketProtect func()
 
 	closeOnce sync.Once
 }
@@ -474,8 +475,9 @@ func (i *Inbound) start() error {
 		}
 	}
 	if i.selfBypass != nil {
-		dialer.RegisterSocketProtectFunc(func(_ context.Context, network, address string, rawConn syscall.RawConn) error {
-			return i.selfBypass.RegisterSocket(rawConn)
+		selfBypass := i.selfBypass
+		i.unregisterSocketProtect = dialer.RegisterSocketProtectFunc(func(_ context.Context, network, address string, rawConn syscall.RawConn) error {
+			return selfBypass.RegisterSocket(rawConn)
 		})
 		i.protectRegistered = true
 	}
@@ -843,7 +845,10 @@ func (i *Inbound) Close() error {
 		i.stopDatapathReporter()
 		i.stopDNSRelays()
 		if i.protectRegistered {
-			dialer.UnregisterSocketProtectFunc()
+			if i.unregisterSocketProtect != nil {
+				i.unregisterSocketProtect()
+			}
+			i.unregisterSocketProtect = nil
 			i.protectRegistered = false
 		}
 		i.stopFakeIPTracking()

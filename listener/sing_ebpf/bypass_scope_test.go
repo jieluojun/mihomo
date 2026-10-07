@@ -165,12 +165,14 @@ func TestEffectiveBypassRuleSets(t *testing.T) {
 	}
 }
 
-// A disabled local scope refuses its own options, as it does its other keys.
-// A disabled shared block is dropped whole, which is how configuration
-// generators that always emit it keep working.
+// Both disabled scopes ignore populated templates, including rule-set names.
 func TestInactiveScopeBypassRuleSet(t *testing.T) {
-	if err := validateLocalOptions(false, LC.EBPFLocal{BypassRuleSet: []string{"cn"}}); err == nil {
-		t.Fatal("local.bypass-rule-set was accepted with the local scope disabled")
+	local, _, err := applyLegacyOptions(LC.EBPF{
+		Shared: LC.EBPFShared{Enable: boolPtr(true)},
+		Local:  LC.EBPFLocal{BypassRuleSet: []string{"cn"}},
+	})
+	if err != nil || len(local.Local.BypassRuleSet) != 0 {
+		t.Fatalf("disabled local rule sets survived: %+v, %v", local.Local, err)
 	}
 	options, _, err := applyLegacyOptions(LC.EBPF{
 		Local:  LC.EBPFLocal{Enable: boolPtr(true)},
@@ -272,7 +274,7 @@ func TestUpdateOfScopedBypassRuleSets(t *testing.T) {
 	sharedOnly := updatableInboundForTest(t, providerTunnel, "cn")
 	sharedOnly.localEnabled = false
 	sharedOnly.sharedEnabled = true
-	if err = sharedOnly.Update(LC.EBPF{UDPTimeout: 300, Local: LC.EBPFLocal{BypassRuleSet: []string{"lan"}}}); err == nil {
-		t.Fatal("local.bypass-rule-set was applied with the local scope disabled")
+	if err = sharedOnly.Update(LC.EBPF{UDPTimeout: 300, BypassRuleSet: []string{"cn"}, Local: LC.EBPFLocal{BypassRuleSet: []string{"missing"}}}); err != nil {
+		t.Fatalf("disabled local rule sets affected update: %v", err)
 	}
 }

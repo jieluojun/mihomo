@@ -90,3 +90,30 @@ func TestSelfBypassSocketAddrHooks(t *testing.T) {
 		t.Fatalf("unexpected IPv4-only self-bypass hooks: %+v", ipv4Only)
 	}
 }
+
+func TestSelfBypassModes(t *testing.T) {
+	tests := []struct {
+		mode         SelfBypassMode
+		name         string
+		cleanup      string
+		cgroupAttach bool
+	}{
+		{SelfBypassUserspace, "userspace_socket_cookie", "lru_fallback", false},
+		{SelfBypassCgroupSocket, "cgroup_socket_cookie", "socket_release", true},
+		{SelfBypassCgroupSocketAddr, "cgroup_socket_addr", "lru_fallback", true},
+		{SelfBypassUserspaceRelease, "userspace_socket_cookie_release", "socket_release", false},
+	}
+	for _, test := range tests {
+		if test.mode.String() != test.name {
+			t.Fatalf("mode %d string = %q, want %q", test.mode, test.mode.String(), test.name)
+		}
+		if test.mode.CleanupMode() != test.cleanup {
+			t.Fatalf("mode %s cleanup = %q, want %q", test.name, test.mode.CleanupMode(), test.cleanup)
+		}
+		bypass := &SelfBypass{}
+		bypass.mode.Store(uint32(test.mode))
+		if bypass.CgroupAttached() != test.cgroupAttach {
+			t.Fatalf("mode %s cgroup attached = %v, want %v", test.name, bypass.CgroupAttached(), test.cgroupAttach)
+		}
+	}
+}

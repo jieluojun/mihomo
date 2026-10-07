@@ -39,11 +39,14 @@ func (b *CgroupBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool,
 	if err := b.health.requireUsable(b.runtime != nil); err != nil {
 		return false, err
 	}
+	previous := dualStackCIDRPrefixes{b.bypassIPv4CIDR, b.bypassIPv6CIDR}
+	next := dualStackCIDRPrefixes{policy.ipv4, policy.ipv6}
+	previousIPv4, previousIPv6 := b.runtime.bypass_ipv4_policy, b.runtime.bypass_ipv6_policy
 	changed, err := replaceDualStackCIDRPolicy(
 		b.runtime.maps["cgroup_bypass_ipv4"],
 		b.runtime.maps["cgroup_bypass_ipv6"],
-		dualStackCIDRPrefixes{b.bypassIPv4CIDR, b.bypassIPv6CIDR},
-		dualStackCIDRPrefixes{policy.ipv4, policy.ipv6},
+		previous,
+		next,
 		"eBPF cgroup ", "bypass CIDR",
 	)
 	if err != nil {
@@ -54,6 +57,23 @@ func (b *CgroupBackend) UpdateCompiledBypassCIDR(policy BypassCIDRPolicy) (bool,
 	}
 	b.bypassIPv4CIDR = slices.Clone(policy.ipv4)
 	b.bypassIPv6CIDR = slices.Clone(policy.ipv6)
+	b.runtime.bypass_ipv4_policy = len(policy.ipv4) > 0 && b.redirectIPv4.IsValid()
+	b.runtime.bypass_ipv6_policy = len(policy.ipv6) > 0 && b.redirectIPv6.IsValid()
+	flagsChanged := previousIPv4 != b.runtime.bypass_ipv4_policy || previousIPv6 != b.runtime.bypass_ipv6_policy
+	if flagsChanged && b.listenerPort != 0 {
+		if err = b.updateCgroupControl(b.listenerPort); err != nil {
+			_, rollbackErr := replaceDualStackCIDRPolicy(
+				b.runtime.maps["cgroup_bypass_ipv4"], b.runtime.maps["cgroup_bypass_ipv6"],
+				next, previous, "eBPF cgroup ", "bypass CIDR rollback",
+			)
+			b.bypassIPv4CIDR, b.bypassIPv6CIDR = previous.ipv4, previous.ipv6
+			b.runtime.bypass_ipv4_policy, b.runtime.bypass_ipv6_policy = previousIPv4, previousIPv6
+			if rollbackErr != nil {
+				return false, E.Errors(err, rollbackErr, b.health.invalidate("cgroup", "bypass CIDR control"))
+			}
+			return false, E.Cause(err, "update cgroup bypass CIDR control")
+		}
+	}
 	return changed, nil
 }
 

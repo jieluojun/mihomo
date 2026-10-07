@@ -50,6 +50,11 @@ CN IP 直连是把规则集里的网段编译进两个 LPM trie（IPv4 一个、
 
 ## 与 sing-box 上游的同步
 
+2026-10-07 更新：原 `testing-ebpf-tc-rewrite` 分支已不存在，后续开发转到
+[CHIZI-0618/sing-ebpf](https://github.com/CHIZI-0618/sing-ebpf)。本分支继续保留内置后端，
+最新移植范围和暂缓项目见[上游同步记录](upstream-sync-20261007.md)。下文的 `4af7ae48`
+是初始移植基线，并非当前后端完整同步的版本号。
+
 eBPF 后端以 [CHIZI-0618/sing-box](https://github.com/CHIZI-0618/sing-box) 的 `testing-ebpf-tc-rewrite` 分支为准。该分支会 force-push 重写历史，所以同步时按 `common/ebpf/internal/bpfgen/manifest.txt` 里的源文件哈希和目录树对比，不看 commit 祖先。当前已同步到 `4af7ae48`，比 TanakaLun 分支多出这几个修复：
 
 - **自身流量误判**（`58cd212d`）：开启进程跟踪后 UID 策略位也写进 cookie 表，原来任何被跟踪的 socket 都会被当成 mihomo 自身而绕过；现在必须带 `SELF_BYPASS` 位才算，exclude 模式下的元数据取反也一并修正。

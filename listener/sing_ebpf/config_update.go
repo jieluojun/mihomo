@@ -93,9 +93,6 @@ func (i *Inbound) udpTimeoutSteps(next time.Duration) []reversibleStep {
 // listener's own config is a typo, and starting with it silently missing is the
 // same failure New refuses outright.
 func (i *Inbound) bypassRuleSetStep(options LC.EBPF) (*reversibleStep, error) {
-	if !i.localEnabled && len(options.Local.BypassRuleSet) > 0 {
-		return nil, E.New("local.bypass_rule_set requires local or hybrid mode")
-	}
 	nextLocal, nextShared := effectiveBypassRuleSets(options, i.localEnabled, i.sharedEnabled)
 	i.bypassRuleSetAccess.Lock()
 	currentLocal, currentShared := i.localBypassTags, i.sharedBypassTags

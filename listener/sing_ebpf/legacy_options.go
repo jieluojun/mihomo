@@ -59,9 +59,11 @@ func applyLegacyOptions(options LC.EBPF) (LC.EBPF, []string, error) {
 		// New reports the mode error itself; there is nothing to fold.
 		return options, nil, nil
 	}
-	// Discard inactive shared settings before legacy conversion and validation.
-	// Configuration generators may populate this block in local-only mode.
-	// Keep Enabled because it participates in mode selection on the next pass.
+	// Disabled scopes may still contain a complete configuration template.
+	// Keep only the selector before converting or validating legacy settings.
+	if !localEnabled {
+		options.Local = LC.EBPFLocal{Enabled: options.Local.Enabled}
+	}
 	if !sharedEnabled {
 		options.Shared = LC.EBPFShared{Enabled: options.Shared.Enabled}
 	}
