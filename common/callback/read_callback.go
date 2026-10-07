@@ -52,6 +52,10 @@ func (c *firstReadCallBackConn) ReaderReplaceable() bool {
 	return c.read.Load()
 }
 
+func (c *firstReadCallBackConn) ReaderPossiblyReplaceable() bool {
+	return !c.read.Load()
+}
+
 var _ N.ExtendedConn = (*firstReadCallBackConn)(nil)
 
 func NewFirstReadCallBackConn(c C.Conn, callback func(error)) C.Conn {

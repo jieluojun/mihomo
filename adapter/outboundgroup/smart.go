@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dlclark/regexp2"
@@ -563,16 +564,23 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	start := time.Now()
 
-	var firstWriteErr atomic.TypedValue[error]
 	var firstReadErr atomic.TypedValue[error]
 	var firstReadLatency atomic.Int64
+	var observedReadErr atomic.TypedValue[error]
+	var observedWriteErr atomic.TypedValue[error]
 
-	if N.NeedHandshake(c) {
-		c = callback.NewFirstWriteCallBackConn(c, func(err error) {
-			if err != nil {
-				firstWriteErr.Store(err)
-			}
-		})
+	needHandshake := N.NeedHandshake(c)
+	// a raw relay must keep its splice fast path: the copy engine peels wrappers
+	// down to the socket, so the observer would disable it; skip those chains
+	stop := N.UnwrapWriter(c)
+	if _, isRawRelay := stop.(syscall.Conn); !isRawRelay {
+		if u, ok := stop.(interface{ Upstream() any }); !ok || u.Upstream() != nil {
+			c = callback.NewErrorCallBackConn(c, &observedReadErr, &observedWriteErr)
+		}
+	}
+
+	if needHandshake {
+		c = callback.NewFirstWriteCallBackConn(c, nil)
 	}
 
 	c = callback.NewFirstReadCallBackConn(c, func(err error) {
@@ -584,7 +592,8 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	return s.registerClosureMetricsCallback(
 		c, proxy, metadata, connectTime,
-		&firstReadLatency, &firstReadErr, &firstWriteErr,
+		&firstReadLatency, &firstReadErr,
+		&observedReadErr, &observedWriteErr,
 	)
 }
 
@@ -599,12 +608,15 @@ func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadat
 	pc.AppendToChains(s)
 
 	var udpLatency atomic.Int64
+	var observedReadErr atomic.TypedValue[error]
+	var observedWriteErr atomic.TypedValue[error]
 
+	pc = callback.NewErrorCallBackPacketConn(pc, &observedReadErr, &observedWriteErr)
 	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
 		udpLatency.Store(latency)
 	})
 
-	return s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime, &udpLatency)
+	return s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime, &udpLatency, &observedReadErr, &observedWriteErr)
 }
 
 func (s *Smart) Set(name string) error {
@@ -1555,7 +1567,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	}
 }
 
-func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], firstWriteErr *atomic.TypedValue[error]) C.Conn {
+func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], observedReadErr *atomic.TypedValue[error], observedWriteErr *atomic.TypedValue[error]) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
 		if tracker != nil {
@@ -1568,7 +1580,11 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 
 			latency := firstReadLatency.Load()
 			readErr := firstReadErr.Load()
-			writeErr := firstWriteErr.Load()
+			// the observer covers mid-transfer errors the one-shot callbacks miss
+			if err := observedReadErr.Load(); err != nil {
+				readErr = err
+			}
+			writeErr := observedWriteErr.Load()
 
 			var tcpStats *tcpstats.Stats
 			if trackerConn, ok := tracker.(net.Conn); ok {
@@ -1584,6 +1600,13 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 				} else {
 					closeErr = readErr
 				}
+			} else if writeErr != nil && writeErr != io.EOF {
+				closeErr = writeErr
+			}
+
+			// a connection the group closed on purpose is not a transfer failure
+			if metadata.SmartBlock == "degraded" {
+				closeErr = nil
 			}
 
 			s.submitConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr, true)
@@ -1592,7 +1615,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 	})
 }
 
-func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, udpLatency *atomic.Int64) C.PacketConn {
+func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, udpLatency *atomic.Int64, observedReadErr *atomic.TypedValue[error], observedWriteErr *atomic.TypedValue[error]) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
 		if tracker != nil {
@@ -1603,8 +1626,17 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
+			closeErr := observedReadErr.Load()
+			if closeErr == nil {
+				closeErr = observedWriteErr.Load()
+			}
+			// a connection the group closed on purpose is not a transfer failure
+			if metadata.SmartBlock == "degraded" {
+				closeErr = nil
+			}
+
 			s.submitConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
-				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, nil, false)
+				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, closeErr, false)
 			return
 		}
 	})
@@ -1890,8 +1922,8 @@ func (s *Smart) checkNodeQuality(state targetState, metadata *C.Metadata, proxy 
 		return q.weight, false, false, 0
 	}
 
-	// high packet loss detection
-	if q.lossRate >= 0.1 || q.emaLossRate >= 0.05 {
+	// a strike needs current loss too, the decaying ema alone must not confirm it
+	if q.lossRate >= 0.1 || (q.lossRate >= 0.05 && q.emaLossRate >= 0.05) {
 		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected high packet loss [current: %.2f%%, history EMA: %.2f%%]...",
 			s.Name(), proxyName, metadata.NetWork.String(), q.address, q.lossRate*100, q.emaLossRate*100)
 		return q.weight, true, true, smart.BlockPacketLoss
@@ -1911,7 +1943,9 @@ func (s *Smart) markNodeFailure(metadata *C.Metadata, proxyName string, isDegrad
 
 	if hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked, blockCode) {
 		if target != "" && target != wildcardTarget {
-			s.store.UpdateHostStatus(s.Name(), s.configName, target, metadata, proxyName, s.maxFailedTimes, int(s.hostFailLimit.Load()), isDegraded, checked, blockCode, ttl)
+			if s.store.UpdateHostStatus(s.Name(), s.configName, target, metadata, proxyName, s.maxFailedTimes, int(s.hostFailLimit.Load()), isDegraded, checked, blockCode, ttl) {
+				failedBlock = true
+			}
 		}
 	}
 

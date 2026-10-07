@@ -723,7 +723,11 @@ func (w *ExitWatcher) MaybeProbe(parent context.Context, proxy C.Proxy) {
 		}
 
 		w.Store(node, ExitInfo{Region: result.Region, ASN: result.ASN, Key: result.Key}, time.Now())
-		log.Debugln("[Smart] Exit probe [%s] node [%s] -> region [%s] asn [%s]", w.name, node, result.Region, result.ASN)
+		if result.ASN != "" {
+			log.Debugln("[Smart] Exit probe [%s] node [%s] -> region [%s] asn [%s]", w.name, node, result.Region, result.ASN)
+		} else {
+			log.Debugln("[Smart] Exit probe [%s] node [%s] -> region [%s]", w.name, node, result.Region)
+		}
 		w.storeExitState(node, w.Info(node))
 		for _, target := range w.Release(node) {
 			log.Debugln("[Smart] Exit refusal released [%s] target [%s] node [%s] after its exit answer", w.name, target, node)
