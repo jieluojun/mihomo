@@ -342,8 +342,19 @@ CGO_ENABLED=0 GOARCH=amd64 \
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) — 上游项目本体及 [官方文档](https://wiki.metacubex.one/)
 - [vernesong/mihomo](https://github.com/vernesong/mihomo) — smart 策略组与模型选择机制
 - [TanakaLun/mihomo](https://github.com/TanakaLun/mihomo/tree/ebpf-inbound) — eBPF 透明入站适配层
-- [CHIZI-0618/sing-ebpf](https://github.com/CHIZI-0618/sing-ebpf) — eBPF TC + cgroup 后端后续开发；本分支保留内置后端，见[同步记录](docs/upstream-sync-20261007.md)
+- [CHIZI-0618/sing-ebpf](https://github.com/CHIZI-0618/sing-ebpf) — eBPF TC + cgroup 后端后续开发
 - [Dreamacro/clash](https://github.com/Dreamacro/clash) 与 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
+
+
+最后感谢以下大模型，代码都是它们写的
+
+- Claude Opus 5.5
+- Claude Fable 5.1
+- Claude Opus 5
+- GPT 6 Astra
+- GPT 6.1 Sol
+- GPT 5.6 Sol
+- Gemini 3.8 Flash: 本文档编写
 
 ## 许可证
 
