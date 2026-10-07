@@ -68,6 +68,10 @@ jobs:
       - name: Test
         run: go test ./... -v -count=1
 
+      # ./... does not enter the nested module used for the SMUX queue fix.
+      - name: Test patched SMUX
+        run: go test github.com/metacubex/smux -v -count=1
+
       - name: Test with tag with_gvisor
         run: go test ./... -v -count=1 -tags "with_gvisor"
 

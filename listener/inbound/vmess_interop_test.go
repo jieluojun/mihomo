@@ -141,11 +141,35 @@ func vmessInteropGoEnv() []string {
 	return env
 }
 
+type vmessInteropProcessOutput struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	ready  chan struct{}
+	once   sync.Once
+}
+
+func (o *vmessInteropProcessOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n, err := o.buffer.Write(p)
+	marker := "V2Ray " + strings.TrimPrefix(vmessInteropV2RayRef, "v") + " started"
+	if bytes.Contains(o.buffer.Bytes(), []byte(marker)) {
+		o.once.Do(func() { close(o.ready) })
+	}
+	return n, err
+}
+
+func (o *vmessInteropProcessOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buffer.String()
+}
+
 func startVMessInteropV2Ray(t *testing.T, v2rayBin string, config []byte, release func(), waitAddr string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, v2rayBin, "run", "-format=jsonv5")
-	var output bytes.Buffer
+	output := vmessInteropProcessOutput{ready: make(chan struct{})}
 	cmd.Stdin = bytes.NewReader(config)
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -167,6 +191,18 @@ func startVMessInteropV2Ray(t *testing.T, v2rayBin string, config []byte, releas
 			t.Log(output.String())
 		}
 	})
+
+	// A successful TCP connect can reach a host-side localhost relay on WSL
+	// before this child has bound its socket. Wait for the child's own readiness
+	// message, emitted after all V2Ray features have started, before probing.
+	select {
+	case <-output.ready:
+	case err := <-done:
+		waited = true
+		t.Fatalf("v2ray exited before startup: %v\n%s", err, output.String())
+	case <-time.After(10 * time.Second):
+		t.Fatalf("v2ray did not finish startup\n%s", output.String())
+	}
 
 	if waitAddr == "" {
 		select {

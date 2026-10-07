@@ -475,9 +475,11 @@ func (m *mirrorConn) fillExplicitNonce(rec *record, c2s bool) {
 	}
 	// recordWriter owns each direction's insert queue, so the generators do not
 	// need additional synchronization here.
-	nonce := m.s2cExplicitNonce.Next()
+	var nonce []byte
 	if c2s {
 		nonce = m.c2sExplicitNonce.Next()
+	} else {
+		nonce = m.s2cExplicitNonce.Next()
 	}
 	copy(rec.fragment[:8], nonce)
 }

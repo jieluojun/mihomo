@@ -151,3 +151,6 @@ require (
 
 // for https://github.com/golang/protobuf/issues/1704
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
+
+// Keep queued SMUX frames alive after a write is cancelled; see third_party/smux/README.mihomo.md.
+replace github.com/metacubex/smux => ./third_party/smux
