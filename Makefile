@@ -2,7 +2,7 @@ NAME=mihomo
 BINDIR=bin
 BRANCH=$(shell git branch --show-current)
 ifeq ($(BRANCH),Alpha)
-VERSION=alpha-smart-$(shell git rev-parse --short HEAD)
+VERSION=alpha-smart-$(shell git rev-parse --short HEAD)-ebpf
 else ifeq ($(BRANCH),Beta)
 VERSION=beta-$(shell git rev-parse --short HEAD)
 else ifeq ($(BRANCH),)

@@ -127,7 +127,7 @@ jobs:
 
     - name: Set variables
       run: |
-        VERSION="${GITHUB_REF_NAME,,}-smart-$(git rev-parse --short HEAD)"
+        VERSION="alpha-smart-$(git rev-parse --short HEAD)-ebpf"
         VERSION="${VERSION//\//-}"
         PackageVersion="$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | jq -r '.tag_name' | sed 's/v//g' | awk -F '.' '{$NF = $NF + 1; print}' OFS='.').${VERSION/-/.}"
         if [ -n "${{ github.event.inputs.version }}" ]; then
