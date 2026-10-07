@@ -60,6 +60,13 @@ struct sb_ebpf_listener_key {
     __u8 token_addr[16];
 };
 
+// Immutable recovery identity: delayed expiry cannot delete a reused token.
+struct sb_ebpf_udp_recovery_key {
+    __u64 socket_cookie;
+    __u64 released_at_ns;
+};
+_Static_assert(sizeof(struct sb_ebpf_udp_recovery_key) == 16U, "UDP recovery key ABI");
+
 struct sb_ebpf_original_dst {
     __u8 family;
     __u8 protocol;

@@ -41,19 +41,21 @@ type Inbound struct {
 	dnsRelays      *dnsRelayLimiter
 	dnsRelayClosed bool
 
-	udpJanitorCancel context.CancelFunc
-	udpJanitorDone   chan struct{}
-	ctx              context.Context
-	tunnel           C.Tunnel
-	additions        []inbound.Addition
-	mode             string
-	localEnabled     bool
-	localDataPlane   string
-	cgroupPath       string
-	sharedEnabled    bool
-	sharedDataPlane  string
-	enableTCP        bool
-	enableUDP        bool
+	udpJanitorCancel  context.CancelFunc
+	udpJanitorDone    chan struct{}
+	udpRecoveryCancel context.CancelFunc
+	udpRecoveryDone   chan struct{}
+	ctx               context.Context
+	tunnel            C.Tunnel
+	additions         []inbound.Addition
+	mode              string
+	localEnabled      bool
+	localDataPlane    string
+	cgroupPath        string
+	sharedEnabled     bool
+	sharedDataPlane   string
+	enableTCP         bool
+	enableUDP         bool
 
 	// The datapath degradation report's own cadence; see datapath_report.go for
 	// why it does not ride on the UDP janitor or the interface-update loop.
@@ -73,6 +75,8 @@ type Inbound struct {
 	sharedExcludeMAC    []ECommon.MACAddress
 	localBypassPort     []ECommon.PortRange
 	sharedBypassPort    []ECommon.PortRange
+	localBypassExclude  []netip.Prefix
+	sharedBypassExclude []netip.Prefix
 	fakeIPIPv4Prefix    netip.Prefix
 	fakeIPIPv6Prefix    netip.Prefix
 	fakeIPICMPReply     bool
@@ -317,6 +321,8 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 		sharedDNSMode:       sharedDNSMode,
 		localIPv6:           localEnabled && enabledByDefault(options.Local.IPv6),
 		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
+		localBypassExclude:  options.Local.BypassExclude,
+		sharedBypassExclude: options.Shared.BypassExclude,
 		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
 		localBypassPort:     localBypassPort,
 		sharedBypassPort:    sharedBypassPort,
@@ -425,6 +431,8 @@ func (i *Inbound) compilePolicyLocked() error {
 		EnableUDP:           i.enableUDP,
 		Local:               localPolicy,
 		SharedDNSMode:       toCommonDNSMode(i.sharedDNSMode),
+		LocalBypassExclude:  i.localBypassExclude,
+		SharedBypassExclude: i.sharedBypassExclude,
 		SharedBypassPrivate: i.sharedBypassPrivate,
 		FakeIPIPv4:          i.fakeIPIPv4Prefix,
 		FakeIPIPv6:          i.fakeIPIPv6Prefix,
@@ -619,6 +627,7 @@ func (i *Inbound) start() error {
 	i.publishBypassPolicyLocked()
 	i.bypassRuleSetAccess.Unlock()
 	i.startFakeIPTracking()
+	i.startUDPRecoveryCleanup()
 	i.reportKernelCapabilities()
 	network := "tcp"
 	if i.enableTCP && i.enableUDP {
@@ -840,6 +849,7 @@ func (i *Inbound) Close() error {
 	var closeErr error
 	i.closeOnce.Do(func() {
 		i.stopUDPJanitor()
+		i.stopUDPRecoveryCleanup()
 		// Stopped and joined here, before anything below drops a backend or
 		// clears sharedRewrite: the reporter reads both without a lock.
 		i.stopDatapathReporter()

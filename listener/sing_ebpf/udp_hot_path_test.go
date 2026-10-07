@@ -57,7 +57,7 @@ func TestHasDirectBindingTracksValidatedFlowsOnly(t *testing.T) {
 	if bound, _ := table.hasDirectBinding(client, destination); bound {
 		t.Fatal("unknown client must not have a binding")
 	}
-	table.setDirectBinding(client, destination, nil, 42, false)
+	table.setDirectBinding(client, destination, nil, 42, false, nil)
 	if bound, _ := table.hasDirectBinding(client, destination); !bound {
 		t.Fatal("expected the validated flow to be cached")
 	}
@@ -177,8 +177,8 @@ func TestDirectBindingRemembersTheSelectingRole(t *testing.T) {
 	shared := netip.MustParseAddrPort("10.0.0.1:53")
 	local := netip.MustParseAddrPort("10.0.0.2:53")
 
-	table.setDirectBinding(client, shared, nil, 1, true)
-	table.setDirectBinding(client, local, nil, 2, false)
+	table.setDirectBinding(client, shared, nil, 1, true, nil)
+	table.setDirectBinding(client, local, nil, 2, false, nil)
 
 	if bound, sharedPath := table.hasDirectBinding(client, shared); !bound || !sharedPath {
 		t.Fatalf("shared flow: bound=%v sharedPath=%v", bound, sharedPath)

@@ -27,7 +27,7 @@ func TestTCABI(t *testing.T) {
 	if size := unsafe.Sizeof(tcAssignKey{}); size != 44 {
 		t.Fatalf("unexpected TC assignment key size: %d", size)
 	}
-	if size := unsafe.Sizeof(TCAssignment{}); size != 24 {
+	if size := unsafe.Sizeof(TCAssignment{}); size != 32 {
 		t.Fatalf("unexpected TC assignment value size: %d", size)
 	}
 	if offset := unsafe.Offsetof(TCAssignment{}.SocketCookie); offset != 0 {

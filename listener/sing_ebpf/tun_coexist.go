@@ -40,7 +40,7 @@ func (i *Inbound) publishBypassPolicyLocked() {
 	}
 	var routeExclude []netip.Prefix
 	if i.bypassesPrivateAddress() {
-		routeExclude = ECommon.PrivateAddressPrefixes()
+		routeExclude = i.excludeForcedPrefixes(ECommon.PrivateAddressPrefixes())
 	}
 	prefixes := effectiveBypassPrefixes(routeExclude, i.bypassCIDR)
 	i.bypassPublisher.Publish(i.dnsBypassSet, prefixes, routeExclude, i.bypassTUNDirect)

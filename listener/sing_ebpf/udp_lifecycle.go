@@ -229,7 +229,12 @@ func (i *Inbound) expireUDP(cutoff int64, round *udpSweepRound) bool {
 		}
 		progress.limit = roundLimit
 	}
-	pending := round.local.more() || round.shared.more()
+	recoveryPending := false
+	if backend := i.cgroupBackendInstance(); backend != nil {
+		complete, err := backend.SweepUDPRecovery(udpIdleSweepBudget)
+		recoveryPending = err == nil && !complete
+	}
+	pending := round.local.more() || round.shared.more() || recoveryPending
 	if !pending {
 		round.started = false
 	}

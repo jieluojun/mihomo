@@ -22,13 +22,19 @@ const (
 	CgroupMapCgroupControl               = "cgroup_control"
 	CgroupMapCgroupHostIpv4              = "cgroup_host_ipv4"
 	CgroupMapCgroupHostIpv6              = "cgroup_host_ipv6"
+	CgroupMapCgroupLocalForceIpv4        = "cgroup_local_force_ipv4"
+	CgroupMapCgroupLocalForceIpv6        = "cgroup_local_force_ipv6"
 	CgroupMapCgroupSocketBypass          = "cgroup_socket_bypass"
 	CgroupMapCgroupTcpRedirect           = "cgroup_tcp_redirect"
 	CgroupMapCgroupUdpFlow               = "cgroup_udp_flow"
 	CgroupMapCgroupUdpPeer               = "cgroup_udp_peer"
 	CgroupMapCgroupUdpRecovery           = "cgroup_udp_recovery"
+	CgroupMapCgroupUdpRecoveryValue      = "cgroup_udp_recovery_value"
 	CgroupMapCgroupUdpRedirect           = "cgroup_udp_redirect"
+	CgroupMapCgroupUdpReleaseEvents      = "cgroup_udp_release_events"
+	CgroupMapCgroupUdpReleaseStats       = "cgroup_udp_release_stats"
 	CgroupMapCgroupUdpToken              = "cgroup_udp_token"
+	CgroupMapCgroupUdpTokenReverse       = "cgroup_udp_token_reverse"
 	CgroupMapCgroupUidPolicy             = "cgroup_uid_policy"
 	CgroupProgSbEbpfConn4Cookie          = "sb_ebpf_conn4_cookie"
 	CgroupProgSbEbpfConn4CookieTcp       = "sb_ebpf_conn4_cookie_tcp"
@@ -40,6 +46,7 @@ const (
 	CgroupProgSbEbpfConn6MappedCookieTcp = "sb_ebpf_conn6_mapped_cookie_tcp"
 	CgroupProgSbEbpfConn6MappedCookieUdp = "sb_ebpf_conn6_mapped_cookie_udp"
 	CgroupProgSbEbpfRelCookie            = "sb_ebpf_rel_cookie"
+	CgroupProgSbEbpfRelNotify            = "sb_ebpf_rel_notify"
 	CgroupProgSbEbpfUdp4Cookie           = "sb_ebpf_udp4_cookie"
 	CgroupProgSbEbpfUdp6Cookie           = "sb_ebpf_udp6_cookie"
 	CgroupProgSbEbpfUdp6MappedCookie     = "sb_ebpf_udp6_mapped_cookie"
@@ -100,6 +107,7 @@ type CgroupProgramSpecs struct {
 	SbEbpfConn6MappedCookieTcp *ebpf.ProgramSpec `ebpf:"sb_ebpf_conn6_mapped_cookie_tcp"`
 	SbEbpfConn6MappedCookieUdp *ebpf.ProgramSpec `ebpf:"sb_ebpf_conn6_mapped_cookie_udp"`
 	SbEbpfRelCookie            *ebpf.ProgramSpec `ebpf:"sb_ebpf_rel_cookie"`
+	SbEbpfRelNotify            *ebpf.ProgramSpec `ebpf:"sb_ebpf_rel_notify"`
 	SbEbpfUdp4Cookie           *ebpf.ProgramSpec `ebpf:"sb_ebpf_udp4_cookie"`
 	SbEbpfUdp6Cookie           *ebpf.ProgramSpec `ebpf:"sb_ebpf_udp6_cookie"`
 	SbEbpfUdp6MappedCookie     *ebpf.ProgramSpec `ebpf:"sb_ebpf_udp6_mapped_cookie"`
@@ -112,20 +120,26 @@ type CgroupProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type CgroupMapSpecs struct {
-	CgroupBypassIpv4   *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv4"`
-	CgroupBypassIpv6   *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv6"`
-	CgroupBypassPort   *ebpf.MapSpec `ebpf:"cgroup_bypass_port"`
-	CgroupControl      *ebpf.MapSpec `ebpf:"cgroup_control"`
-	CgroupHostIpv4     *ebpf.MapSpec `ebpf:"cgroup_host_ipv4"`
-	CgroupHostIpv6     *ebpf.MapSpec `ebpf:"cgroup_host_ipv6"`
-	CgroupSocketBypass *ebpf.MapSpec `ebpf:"cgroup_socket_bypass"`
-	CgroupTcpRedirect  *ebpf.MapSpec `ebpf:"cgroup_tcp_redirect"`
-	CgroupUdpFlow      *ebpf.MapSpec `ebpf:"cgroup_udp_flow"`
-	CgroupUdpPeer      *ebpf.MapSpec `ebpf:"cgroup_udp_peer"`
-	CgroupUdpRecovery  *ebpf.MapSpec `ebpf:"cgroup_udp_recovery"`
-	CgroupUdpRedirect  *ebpf.MapSpec `ebpf:"cgroup_udp_redirect"`
-	CgroupUdpToken     *ebpf.MapSpec `ebpf:"cgroup_udp_token"`
-	CgroupUidPolicy    *ebpf.MapSpec `ebpf:"cgroup_uid_policy"`
+	CgroupBypassIpv4       *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv4"`
+	CgroupBypassIpv6       *ebpf.MapSpec `ebpf:"cgroup_bypass_ipv6"`
+	CgroupBypassPort       *ebpf.MapSpec `ebpf:"cgroup_bypass_port"`
+	CgroupControl          *ebpf.MapSpec `ebpf:"cgroup_control"`
+	CgroupHostIpv4         *ebpf.MapSpec `ebpf:"cgroup_host_ipv4"`
+	CgroupHostIpv6         *ebpf.MapSpec `ebpf:"cgroup_host_ipv6"`
+	CgroupLocalForceIpv4   *ebpf.MapSpec `ebpf:"cgroup_local_force_ipv4"`
+	CgroupLocalForceIpv6   *ebpf.MapSpec `ebpf:"cgroup_local_force_ipv6"`
+	CgroupSocketBypass     *ebpf.MapSpec `ebpf:"cgroup_socket_bypass"`
+	CgroupTcpRedirect      *ebpf.MapSpec `ebpf:"cgroup_tcp_redirect"`
+	CgroupUdpFlow          *ebpf.MapSpec `ebpf:"cgroup_udp_flow"`
+	CgroupUdpPeer          *ebpf.MapSpec `ebpf:"cgroup_udp_peer"`
+	CgroupUdpRecovery      *ebpf.MapSpec `ebpf:"cgroup_udp_recovery"`
+	CgroupUdpRecoveryValue *ebpf.MapSpec `ebpf:"cgroup_udp_recovery_value"`
+	CgroupUdpRedirect      *ebpf.MapSpec `ebpf:"cgroup_udp_redirect"`
+	CgroupUdpReleaseEvents *ebpf.MapSpec `ebpf:"cgroup_udp_release_events"`
+	CgroupUdpReleaseStats  *ebpf.MapSpec `ebpf:"cgroup_udp_release_stats"`
+	CgroupUdpToken         *ebpf.MapSpec `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse  *ebpf.MapSpec `ebpf:"cgroup_udp_token_reverse"`
+	CgroupUidPolicy        *ebpf.MapSpec `ebpf:"cgroup_uid_policy"`
 }
 
 // CgroupVariableSpecs contains global variables before they are loaded into the kernel.
@@ -154,20 +168,26 @@ func (o *CgroupObjects) Close() error {
 //
 // It can be passed to LoadCgroupObjects or ebpf.CollectionSpec.LoadAndAssign.
 type CgroupMaps struct {
-	CgroupBypassIpv4   *ebpf.Map `ebpf:"cgroup_bypass_ipv4"`
-	CgroupBypassIpv6   *ebpf.Map `ebpf:"cgroup_bypass_ipv6"`
-	CgroupBypassPort   *ebpf.Map `ebpf:"cgroup_bypass_port"`
-	CgroupControl      *ebpf.Map `ebpf:"cgroup_control"`
-	CgroupHostIpv4     *ebpf.Map `ebpf:"cgroup_host_ipv4"`
-	CgroupHostIpv6     *ebpf.Map `ebpf:"cgroup_host_ipv6"`
-	CgroupSocketBypass *ebpf.Map `ebpf:"cgroup_socket_bypass"`
-	CgroupTcpRedirect  *ebpf.Map `ebpf:"cgroup_tcp_redirect"`
-	CgroupUdpFlow      *ebpf.Map `ebpf:"cgroup_udp_flow"`
-	CgroupUdpPeer      *ebpf.Map `ebpf:"cgroup_udp_peer"`
-	CgroupUdpRecovery  *ebpf.Map `ebpf:"cgroup_udp_recovery"`
-	CgroupUdpRedirect  *ebpf.Map `ebpf:"cgroup_udp_redirect"`
-	CgroupUdpToken     *ebpf.Map `ebpf:"cgroup_udp_token"`
-	CgroupUidPolicy    *ebpf.Map `ebpf:"cgroup_uid_policy"`
+	CgroupBypassIpv4       *ebpf.Map `ebpf:"cgroup_bypass_ipv4"`
+	CgroupBypassIpv6       *ebpf.Map `ebpf:"cgroup_bypass_ipv6"`
+	CgroupBypassPort       *ebpf.Map `ebpf:"cgroup_bypass_port"`
+	CgroupControl          *ebpf.Map `ebpf:"cgroup_control"`
+	CgroupHostIpv4         *ebpf.Map `ebpf:"cgroup_host_ipv4"`
+	CgroupHostIpv6         *ebpf.Map `ebpf:"cgroup_host_ipv6"`
+	CgroupLocalForceIpv4   *ebpf.Map `ebpf:"cgroup_local_force_ipv4"`
+	CgroupLocalForceIpv6   *ebpf.Map `ebpf:"cgroup_local_force_ipv6"`
+	CgroupSocketBypass     *ebpf.Map `ebpf:"cgroup_socket_bypass"`
+	CgroupTcpRedirect      *ebpf.Map `ebpf:"cgroup_tcp_redirect"`
+	CgroupUdpFlow          *ebpf.Map `ebpf:"cgroup_udp_flow"`
+	CgroupUdpPeer          *ebpf.Map `ebpf:"cgroup_udp_peer"`
+	CgroupUdpRecovery      *ebpf.Map `ebpf:"cgroup_udp_recovery"`
+	CgroupUdpRecoveryValue *ebpf.Map `ebpf:"cgroup_udp_recovery_value"`
+	CgroupUdpRedirect      *ebpf.Map `ebpf:"cgroup_udp_redirect"`
+	CgroupUdpReleaseEvents *ebpf.Map `ebpf:"cgroup_udp_release_events"`
+	CgroupUdpReleaseStats  *ebpf.Map `ebpf:"cgroup_udp_release_stats"`
+	CgroupUdpToken         *ebpf.Map `ebpf:"cgroup_udp_token"`
+	CgroupUdpTokenReverse  *ebpf.Map `ebpf:"cgroup_udp_token_reverse"`
+	CgroupUidPolicy        *ebpf.Map `ebpf:"cgroup_uid_policy"`
 }
 
 func (m *CgroupMaps) Close() error {
@@ -178,13 +198,19 @@ func (m *CgroupMaps) Close() error {
 		m.CgroupControl,
 		m.CgroupHostIpv4,
 		m.CgroupHostIpv6,
+		m.CgroupLocalForceIpv4,
+		m.CgroupLocalForceIpv6,
 		m.CgroupSocketBypass,
 		m.CgroupTcpRedirect,
 		m.CgroupUdpFlow,
 		m.CgroupUdpPeer,
 		m.CgroupUdpRecovery,
+		m.CgroupUdpRecoveryValue,
 		m.CgroupUdpRedirect,
+		m.CgroupUdpReleaseEvents,
+		m.CgroupUdpReleaseStats,
 		m.CgroupUdpToken,
+		m.CgroupUdpTokenReverse,
 		m.CgroupUidPolicy,
 	)
 }
@@ -209,6 +235,7 @@ type CgroupPrograms struct {
 	SbEbpfConn6MappedCookieTcp *ebpf.Program `ebpf:"sb_ebpf_conn6_mapped_cookie_tcp"`
 	SbEbpfConn6MappedCookieUdp *ebpf.Program `ebpf:"sb_ebpf_conn6_mapped_cookie_udp"`
 	SbEbpfRelCookie            *ebpf.Program `ebpf:"sb_ebpf_rel_cookie"`
+	SbEbpfRelNotify            *ebpf.Program `ebpf:"sb_ebpf_rel_notify"`
 	SbEbpfUdp4Cookie           *ebpf.Program `ebpf:"sb_ebpf_udp4_cookie"`
 	SbEbpfUdp6Cookie           *ebpf.Program `ebpf:"sb_ebpf_udp6_cookie"`
 	SbEbpfUdp6MappedCookie     *ebpf.Program `ebpf:"sb_ebpf_udp6_mapped_cookie"`
@@ -229,6 +256,7 @@ func (p *CgroupPrograms) Close() error {
 		p.SbEbpfConn6MappedCookieTcp,
 		p.SbEbpfConn6MappedCookieUdp,
 		p.SbEbpfRelCookie,
+		p.SbEbpfRelNotify,
 		p.SbEbpfUdp4Cookie,
 		p.SbEbpfUdp6Cookie,
 		p.SbEbpfUdp6MappedCookie,

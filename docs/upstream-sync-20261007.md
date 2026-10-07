@@ -43,7 +43,9 @@
 - TanakaLun 的主上游同步提交已由 Smart 分支的合并覆盖；其依赖版本更新不用原样
   带入内置后端。
 
-## 本次暂缓
+## 初次同步未合入（后续已适配）
+
+以下是初次同步时的取舍；后续适配已经完成，当前状态见[适配记录](upstream-adaptation-20261007.md)。
 
 - `bypass-exclude`（TanakaLun `2fe3a07f`、`f67d2cb6`）：外部后端使用与 fake-IP
   共用的强制拦截槽，本分支具有 fake-IP 热更新和 TUN 共存能力，需要另行设计 ABI。
@@ -62,7 +64,7 @@ sing-box 的 `ebpf-inbound` 位于 `9f7ab977`；TanakaLun 的 `ebpf-inbound` 位
 `94371fb4`，使用 sing-ebpf `a0edc850`。
 
 内置后端仍有本分支特有的改动，不能用单个 sing-ebpf 提交号表示完整同步。
-本次未改变 C 源码或已生成的 BPF 对象。
+初次同步未改变 C 源码或已生成的 BPF 对象；后续适配已重新生成两种字节序的对象。
 
 ## 验证
 

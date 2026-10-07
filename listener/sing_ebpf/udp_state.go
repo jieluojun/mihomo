@@ -56,6 +56,7 @@ type udpClientState struct {
 }
 
 type udpRedirectBinding struct {
+	retireTC        func()
 	replyAlias      bool
 	redirectAddress netip.Addr
 	packetInfo      []byte
@@ -159,6 +160,7 @@ func (t *udpClientTable) setDirectBinding(
 	sourceMAC net.HardwareAddr,
 	socketCookie uint64,
 	sharedPath bool,
+	retireTC func(),
 ) {
 	state := t.loadOrCreate(client)
 	state.access.Lock()
@@ -167,7 +169,7 @@ func (t *udpClientTable) setDirectBinding(
 		state.sourceMAC = append(state.sourceMAC[:0], sourceMAC...)
 	}
 	state.socketCookie = socketCookie
-	state.bindings[destination] = udpRedirectBinding{sharedPath: sharedPath}
+	state.bindings[destination] = udpRedirectBinding{sharedPath: sharedPath, retireTC: retireTC}
 }
 
 func (t *udpClientTable) setDirectReplyBinding(
@@ -212,6 +214,11 @@ func (t *udpClientTable) delete(client netip.AddrPort, expected *udpClientState)
 		redirects = append(redirects, address)
 	}
 	expected.closed = true
+	for _, binding := range expected.bindings {
+		if binding.retireTC != nil {
+			binding.retireTC()
+		}
+	}
 	clear(expected.bindings)
 	clear(expected.cgroupOriginals)
 	expected.cgroupDataPlane = false

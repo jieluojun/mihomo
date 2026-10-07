@@ -52,6 +52,10 @@ func populateUIDPolicyMap(mapInstance *CiliumEBPF.Map, entries []uidLPMKey) erro
 }
 
 type policyMapTargets struct {
+	LocalForceIPv4    *CiliumEBPF.Map
+	LocalForceIPv6    *CiliumEBPF.Map
+	SharedForceIPv4   *CiliumEBPF.Map
+	SharedForceIPv6   *CiliumEBPF.Map
 	Scope             string
 	UID               *CiliumEBPF.Map
 	LocalPort         *CiliumEBPF.Map
@@ -97,6 +101,10 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 		mapInst  *CiliumEBPF.Map
 		prefixes []netip.Prefix
 	}{
+		{name: "local bypass-exclude IPv4", mapInst: targets.LocalForceIPv4, prefixes: policy.localBypassExclude.ipv4},
+		{name: "local bypass-exclude IPv6", mapInst: targets.LocalForceIPv6, prefixes: policy.localBypassExclude.ipv6},
+		{name: "shared bypass-exclude IPv4", mapInst: targets.SharedForceIPv4, prefixes: policy.sharedBypassExclude.ipv4},
+		{name: "shared bypass-exclude IPv6", mapInst: targets.SharedForceIPv6, prefixes: policy.sharedBypassExclude.ipv6},
 		{name: "include source IPv4", mapInst: targets.IncludeSourceIPv4, prefixes: policy.includeSource.ipv4},
 		{name: "include source IPv6", mapInst: targets.IncludeSourceIPv6, prefixes: policy.includeSource.ipv6},
 		{name: "exclude source IPv4", mapInst: targets.ExcludeSourceIPv4, prefixes: policy.excludeSource.ipv4},
@@ -104,6 +112,9 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 	} {
 		if entry.mapInst == nil || len(entry.prefixes) == 0 {
 			continue
+		}
+		if err := checkLPMTriePolicyCompatibility(scope+" "+entry.name, len(entry.prefixes)); err != nil {
+			return err
 		}
 		if err := replaceCIDRPolicyMap(entry.mapInst, nil, entry.prefixes); err != nil {
 			return E.Cause(err, "populate ", scope, " ", entry.name, " policy")

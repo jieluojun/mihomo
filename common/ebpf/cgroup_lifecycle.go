@@ -22,6 +22,9 @@ func (b *CgroupBackend) Close() error {
 			b.runtime.displaced[slot] = nil
 		}
 	}
+	if b.runtime.udpReleaseReader != nil {
+		_ = b.runtime.udpReleaseReader.Close()
+	}
 	closeErr := closePrograms(b.runtime.programs)
 	closeErr = E.Errors(closeErr, closeMaps(b.runtime.maps))
 	if b.runtime.cgroupFile != nil {

@@ -145,7 +145,15 @@ struct sb_tc_assign_value {
     __u8 source_mac[6];
     __u8 path;
     __u8 source_mac_valid;
+    __u64 generation;
 };
+
+struct sb_tc_retired_key {
+    struct sb_tc_assign_key flow;
+    __u32 reserved;
+    __u64 generation;
+};
+_Static_assert(sizeof(struct sb_tc_retired_key) == 56, "TC retirement key ABI");
 
 _Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
@@ -157,7 +165,7 @@ _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
 _Static_assert(__builtin_offsetof(struct sb_tc_control, fakeip_ipv6_mask) == 54,
     "sb_tc_control fakeip_ipv6_mask ABI offset");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
-_Static_assert(sizeof(struct sb_tc_assign_value) == 24, "sb_tc_assign_value ABI size");
+_Static_assert(sizeof(struct sb_tc_assign_value) == 32, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
     "sb_tc_assign_value socket_cookie ABI offset");
 
@@ -223,8 +231,13 @@ struct ipv6_fragment_header {
         .max_entries = entries, \
     }
 
+MAP(tc_local_force_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
+MAP(tc_local_force_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
+MAP(tc_shared_force_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
+MAP(tc_shared_force_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
 MAP(tc_control, __u32, struct sb_tc_control, BPF_MAP_TYPE_ARRAY, 1U);
 MAP(tc_listener_sockets, __u32, __u32, BPF_MAP_TYPE_SOCKMAP, SB_TC_LISTENER_COUNT);
+MAP(tc_retired_assignment, struct sb_tc_retired_key, __u8, BPF_MAP_TYPE_LRU_HASH, 65536U);
 MAP(tc_assignment, struct sb_tc_assign_key, struct sb_tc_assign_value, BPF_MAP_TYPE_LRU_HASH, 65536U);
 MAP(tc_self_sockets, __u64, __u32, BPF_MAP_TYPE_LRU_HASH, 65536U);
 MAP(tc_uid_policy, struct sb_tc_uid_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 4096U);
@@ -248,6 +261,7 @@ MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U
 // shared_stats, and read the same way from Go -- summed across CPUs.
 MAP(tc_stats, __u32, __u64, BPF_MAP_TYPE_PERCPU_ARRAY, SB_TC_STAT_COUNT);
 
+static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
 static void *(*map_lookup)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
 static long (*map_update)(void *map, const void *key, const void *value, __u64 flags) =
     (void *)BPF_FUNC_map_update_elem;
@@ -357,6 +371,30 @@ INLINE bool private_destination(const struct sb_tc_assign_key *key) {
     return sb_ebpf_ipv6_private_address(key->destination_addr);
 }
 
+INLINE bool local_force_v4(const __u8 destination[4]) {
+    struct sb_tc_ipv4_lpm_key key = {.prefixlen = 32U};
+    __builtin_memcpy(key.address, destination, 4U);
+    return map_lookup(&tc_local_force_ipv4, &key) != 0;
+}
+
+INLINE bool local_force_v6(const __u8 destination[16]) {
+    struct sb_tc_ipv6_lpm_key key = {.prefixlen = 128U};
+    __builtin_memcpy(key.address, destination, 16U);
+    return map_lookup(&tc_local_force_ipv6, &key) != 0;
+}
+
+INLINE bool shared_force_v4(const __u8 destination[4]) {
+    struct sb_tc_ipv4_lpm_key key = {.prefixlen = 32U};
+    __builtin_memcpy(key.address, destination, 4U);
+    return map_lookup(&tc_shared_force_ipv4, &key) != 0;
+}
+
+INLINE bool shared_force_v6(const __u8 destination[16]) {
+    struct sb_tc_ipv6_lpm_key key = {.prefixlen = 128U};
+    __builtin_memcpy(key.address, destination, 16U);
+    return map_lookup(&tc_shared_force_ipv6, &key) != 0;
+}
+
 INLINE bool must_intercept_fakeip(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key) {
     if (key->family == AF_INET_VALUE) {
@@ -437,6 +475,7 @@ INLINE bool source_mac_selected(const struct sb_tc_control *control, const __u8 
 
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
+    if (key->family == AF_INET_VALUE ? local_force_v4(key->destination_addr) : local_force_v6(key->destination_addr)) return true;
     if (must_intercept_fakeip(control, key)) return true;
     if (dns_bypassed(key->protocol, key->destination_port, control->local_dns_mode)) return false;
     if (dns_selected(key->protocol, key->destination_port, control->local_dns_mode)) return true;
@@ -451,6 +490,7 @@ INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *co
 
 INLINE bool shared_selected(const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, const __u8 source_mac[6]) {
+    if (key->family == AF_INET_VALUE ? shared_force_v4(key->destination_addr) : shared_force_v6(key->destination_addr)) return true;
     if (must_intercept_fakeip(control, key)) return true;
     if (dns_bypassed(key->protocol, key->destination_port, control->shared_dns_mode)) return false;
     if (dns_selected(key->protocol, key->destination_port, control->shared_dns_mode)) return true;
@@ -665,6 +705,19 @@ INLINE bool source_mac_equal(const __u8 left[6], const __u8 right[6]) {
 // pending TCP accept its original destination and a delivery flow its socket
 // cookie. The packet reaches the socket only after the program returns, so the
 // entry is still in place before anything reads it.
+// Retire only a particular observed generation. New packets rebuild retired
+// metadata; userspace never compare/deletes the kernel's current assignment.
+INLINE bool assignment_retired(const struct sb_tc_assign_key *key, const struct sb_tc_assign_value *value) {
+    if (value == 0 || value->generation == 0U || key->protocol != IPPROTO_UDP_VALUE) return false;
+    struct sb_tc_retired_key identity = {.flow = *key, .generation = value->generation};
+    return map_lookup(&tc_retired_assignment, &identity) != 0;
+}
+
+INLINE long store_assignment(const struct sb_tc_assign_key *key, struct sb_tc_assign_value *value) {
+    value->generation = ktime_get_ns();
+    return map_update(&tc_assignment, key, value, BPF_ANY);
+}
+
 NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *control,
     const struct sb_tc_assign_key *key, const __u8 source_mac[6], __u8 path) {
     bool source_mac_valid = (path & SB_TC_PATH_SOURCE_MAC_VALID) != 0U;
@@ -687,7 +740,7 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
+    bool assignment_changed = existing == 0 || assignment_retired(&assignment_key, existing) || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
@@ -697,7 +750,7 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
         record_tc_stat(SB_TC_STAT_SK_ASSIGN_FAILED);
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if (assignment_changed && store_assignment(&assignment_key, &value) != 0) {
         record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILED);
         return TC_ACT_SHOT;
     }
@@ -726,7 +779,7 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
+    bool assignment_changed = existing == 0 || assignment_retired(&assignment_key, existing) || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
@@ -736,7 +789,7 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
         record_tc_stat(SB_TC_STAT_SK_ASSIGN_FAILED);
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if (assignment_changed && store_assignment(&assignment_key, &value) != 0) {
         record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILED);
         return TC_ACT_SHOT;
     }
@@ -762,7 +815,7 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
-    bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
+    bool assignment_changed = existing == 0 || assignment_retired(&assignment_key, existing) || existing->socket_cookie != value.socket_cookie ||
         existing->ifindex != value.ifindex || existing->path != value.path ||
         existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
@@ -772,7 +825,7 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
         record_tc_stat(SB_TC_STAT_SK_ASSIGN_FAILED);
         return TC_ACT_SHOT;
     }
-    if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
+    if (assignment_changed && store_assignment(&assignment_key, &value) != 0) {
         record_tc_stat(SB_TC_STAT_ASSIGNMENT_UPDATE_FAILED);
         return TC_ACT_SHOT;
     }
@@ -782,9 +835,9 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
 INLINE void record_local_socket_cookie(const struct sb_tc_assign_key *key, __u64 socket_cookie) {
     if (socket_cookie == 0U) return;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, key);
-    if (existing != 0 && existing->socket_cookie == socket_cookie) return;
+    if (existing != 0 && existing->socket_cookie == socket_cookie && !assignment_retired(key, existing)) return;
     struct sb_tc_assign_value value = {.socket_cookie = socket_cookie};
-    map_update(&tc_assignment, key, &value, BPF_ANY);
+    store_assignment(key, &value);
 }
 
 INLINE int redirect_local(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {

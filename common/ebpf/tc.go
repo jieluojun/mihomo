@@ -3,6 +3,7 @@
 package ebpf
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	E "github.com/metacubex/sing/common/exceptions"
 
 	CiliumEBPF "github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -121,6 +123,7 @@ type TCAssignment struct {
 	SourceMAC      MACAddress
 	Path           uint8
 	SourceMACValid uint8
+	Generation     uint64
 }
 
 type tcRuntime struct {
@@ -187,9 +190,14 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	}
 	_ = raiseMemlockLimit()
 	mapOverrides := map[string]mapSpecOverride{
+		"tc_local_force_ipv4":    {name: "sb_tc_lforce4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
+		"tc_local_force_ipv6":    {name: "sb_tc_lforce6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
+		"tc_shared_force_ipv4":   {name: "sb_tc_sforce4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
+		"tc_shared_force_ipv6":   {name: "sb_tc_sforce6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
 		"tc_control":             {name: "sb_tc_ctl", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"tc_listener_sockets":    {name: "sb_tc_listen", mapType: CiliumEBPF.SockMap, maxEntries: 2},
 		"tc_assignment":          {name: "sb_tc_assign", mapType: CiliumEBPF.LRUHash, maxEntries: tcAssignmentCapacity},
+		"tc_retired_assignment":  {name: "sb_tc_retired", mapType: CiliumEBPF.LRUHash, maxEntries: tcAssignmentCapacity},
 		"tc_uid_policy":          {name: "sb_tc_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(uidEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv4":         {name: "sb_tc_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_bypass_ipv6":         {name: "sb_tc_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
@@ -269,6 +277,10 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		return nil, E.Errors(err, backend.Close())
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
+		SharedForceIPv6:   maps["tc_shared_force_ipv6"],
+		SharedForceIPv4:   maps["tc_shared_force_ipv4"],
+		LocalForceIPv6:    maps["tc_local_force_ipv6"],
+		LocalForceIPv4:    maps["tc_local_force_ipv4"],
 		Scope:             "TC eBPF",
 		UID:               maps["tc_uid_policy"],
 		LocalPort:         maps["tc_local_bypass_port"],
@@ -550,6 +562,15 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 	var assignment TCAssignment
 	if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&assignment)); err != nil {
 		return TCAssignment{}, err
+	}
+	if protocol == ProtocolUDP && assignment.Generation != 0 {
+		identity := tcRetiredKey{Flow: key, Generation: assignment.Generation}
+		var retired uint8
+		if err = lookupMap(b.runtime.maps["tc_retired_assignment"].FD(), unsafe.Pointer(&identity), unsafe.Pointer(&retired)); err == nil {
+			return TCAssignment{}, unix.ENOENT
+		} else if !errors.Is(err, unix.ENOENT) {
+			return TCAssignment{}, err
+		}
 	}
 	if remove {
 		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))

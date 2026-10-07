@@ -35,23 +35,24 @@ type EBPF struct {
 type EBPFLocal struct {
 	// Enable is the sing-box spelling of Enabled. Either may be set; when both
 	// are, they must agree.
-	Enable               *bool    `json:"enable" yaml:"enable" inbound:"enable,omitempty"`
-	Enabled              *bool    `json:"enabled" yaml:"enabled" inbound:"enabled,omitempty"`
-	BypassRuleSet        []string `json:"bypass-rule-set" yaml:"bypass-rule-set" inbound:"bypass-rule-set,omitempty"`
-	DataPlane            string   `json:"data-plane" yaml:"data-plane" inbound:"data-plane,omitempty"`
-	CgroupPath           string   `json:"cgroup-path" yaml:"cgroup-path" inbound:"cgroup-path,omitempty"`
-	DNSMode              string   `json:"dns-mode" yaml:"dns-mode" inbound:"dns-mode,omitempty"`
-	IPv6                 *bool    `json:"ipv6" yaml:"ipv6" inbound:"ipv6,omitempty"`
-	BypassPrivateAddress *bool    `json:"bypass-private-address" yaml:"bypass-private-address" inbound:"bypass-private-address,omitempty"`
-	IncludeUID           []uint32 `json:"include-uid" yaml:"include-uid" inbound:"include-uid,omitempty"`
-	IncludeUIDRange      []string `json:"include-uid-range" yaml:"include-uid-range" inbound:"include-uid-range,omitempty"`
-	ExcludeUID           []uint32 `json:"exclude-uid" yaml:"exclude-uid" inbound:"exclude-uid,omitempty"`
-	ExcludeUIDRange      []string `json:"exclude-uid-range" yaml:"exclude-uid-range" inbound:"exclude-uid-range,omitempty"`
-	IncludeAndroidUser   []int    `json:"include-android-user" yaml:"include-android-user" inbound:"include-android-user,omitempty"`
-	IncludePackage       []string `json:"include-package" yaml:"include-package" inbound:"include-package,omitempty"`
-	ExcludePackage       []string `json:"exclude-package" yaml:"exclude-package" inbound:"exclude-package,omitempty"`
-	BypassPort           []uint16 `json:"bypass-port" yaml:"bypass-port" inbound:"bypass-port,omitempty"`
-	BypassPortRange      []string `json:"bypass-port-range" yaml:"bypass-port-range" inbound:"bypass-port-range,omitempty"`
+	Enable               *bool          `json:"enable" yaml:"enable" inbound:"enable,omitempty"`
+	Enabled              *bool          `json:"enabled" yaml:"enabled" inbound:"enabled,omitempty"`
+	BypassRuleSet        []string       `json:"bypass-rule-set" yaml:"bypass-rule-set" inbound:"bypass-rule-set,omitempty"`
+	BypassExclude        []netip.Prefix `json:"bypass-exclude" yaml:"bypass-exclude" inbound:"bypass-exclude,omitempty"`
+	DataPlane            string         `json:"data-plane" yaml:"data-plane" inbound:"data-plane,omitempty"`
+	CgroupPath           string         `json:"cgroup-path" yaml:"cgroup-path" inbound:"cgroup-path,omitempty"`
+	DNSMode              string         `json:"dns-mode" yaml:"dns-mode" inbound:"dns-mode,omitempty"`
+	IPv6                 *bool          `json:"ipv6" yaml:"ipv6" inbound:"ipv6,omitempty"`
+	BypassPrivateAddress *bool          `json:"bypass-private-address" yaml:"bypass-private-address" inbound:"bypass-private-address,omitempty"`
+	IncludeUID           []uint32       `json:"include-uid" yaml:"include-uid" inbound:"include-uid,omitempty"`
+	IncludeUIDRange      []string       `json:"include-uid-range" yaml:"include-uid-range" inbound:"include-uid-range,omitempty"`
+	ExcludeUID           []uint32       `json:"exclude-uid" yaml:"exclude-uid" inbound:"exclude-uid,omitempty"`
+	ExcludeUIDRange      []string       `json:"exclude-uid-range" yaml:"exclude-uid-range" inbound:"exclude-uid-range,omitempty"`
+	IncludeAndroidUser   []int          `json:"include-android-user" yaml:"include-android-user" inbound:"include-android-user,omitempty"`
+	IncludePackage       []string       `json:"include-package" yaml:"include-package" inbound:"include-package,omitempty"`
+	ExcludePackage       []string       `json:"exclude-package" yaml:"exclude-package" inbound:"exclude-package,omitempty"`
+	BypassPort           []uint16       `json:"bypass-port" yaml:"bypass-port" inbound:"bypass-port,omitempty"`
+	BypassPortRange      []string       `json:"bypass-port-range" yaml:"bypass-port-range" inbound:"bypass-port-range,omitempty"`
 
 	// Legacy keys, see EBPF.
 	IPv6Mode      string `json:"ipv6-mode" yaml:"ipv6-mode" inbound:"ipv6-mode,omitempty"`
@@ -62,6 +63,7 @@ type EBPFShared struct {
 	Enable               *bool          `json:"enable" yaml:"enable" inbound:"enable,omitempty"`
 	Enabled              *bool          `json:"enabled" yaml:"enabled" inbound:"enabled,omitempty"`
 	BypassRuleSet        []string       `json:"bypass-rule-set" yaml:"bypass-rule-set" inbound:"bypass-rule-set,omitempty"`
+	BypassExclude        []netip.Prefix `json:"bypass-exclude" yaml:"bypass-exclude" inbound:"bypass-exclude,omitempty"`
 	DataPlane            string         `json:"data-plane" yaml:"data-plane" inbound:"data-plane,omitempty"`
 	DNSMode              string         `json:"dns-mode" yaml:"dns-mode" inbound:"dns-mode,omitempty"`
 	Interface            []string       `json:"interface" yaml:"interface" inbound:"interface,omitempty"`

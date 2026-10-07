@@ -15,7 +15,8 @@ func TestUDPIdleExpiryProtectsQueuedPacketsAndReplies(t *testing.T) {
 	var table udpClientTable
 	client := netip.MustParseAddrPort("192.0.2.1:1234")
 	dest := netip.MustParseAddrPort("1.1.1.1:443")
-	table.setDirectBinding(client, dest, nil, 0, false)
+	retired := 0
+	table.setDirectBinding(client, dest, nil, 0, false, func() { retired++ })
 	state, _ := table.load(client)
 	state.activity.last.Store(1)
 	state.activity.pending.Store(1)
@@ -32,6 +33,10 @@ func TestUDPIdleExpiryProtectsQueuedPacketsAndReplies(t *testing.T) {
 	table.expire(2, false)
 	if len(table.clientShard(client).clients) != 0 || !state.closed {
 		t.Fatal("idle session not removed")
+	}
+	table.delete(client, state)
+	if retired != 1 {
+		t.Fatalf("assignment retired %d times, want once", retired)
 	}
 	if table.setDirectReplyBinding(client, state, dest) {
 		t.Fatal("expired writer recreated binding")

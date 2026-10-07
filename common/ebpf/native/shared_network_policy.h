@@ -6,6 +6,18 @@
 
 #include "fakeip_policy.h"
 
+INLINE bool shared_force_v4(const __u8 destination[4]) {
+    struct sb_lpm4_key key = {.prefixlen = 32U};
+    __builtin_memcpy(key.addr, destination, 4U);
+    return map_lookup(&shared_shared_force_ipv4, &key) != 0;
+}
+
+INLINE bool shared_force_v6(const __u8 destination[16]) {
+    struct sb_lpm6_key key = {.prefixlen = 128U};
+    __builtin_memcpy(key.addr, destination, 16U);
+    return map_lookup(&shared_shared_force_ipv6, &key) != 0;
+}
+
 INLINE bool selected_protocol(__u8 protocol, const struct sb_shared_control *control) {
     if (protocol == IPPROTO_TCP_VALUE) return (control->flags & SB_SHARED_FLAG_TCP) != 0U;
     if (protocol == IPPROTO_UDP_VALUE) return (control->flags & SB_SHARED_FLAG_UDP) != 0U;

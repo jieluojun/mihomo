@@ -31,6 +31,8 @@
         .max_entries = entries, \
     }
 
+EXTERNAL_MAP(shared_shared_force_ipv4, struct sb_lpm4_key, __u8, 4096U);
+EXTERNAL_MAP(shared_shared_force_ipv6, struct sb_lpm6_key, __u8, 4096U);
 EXTERNAL_MAP(shared_control, __u32, struct sb_shared_control, 1U);
 struct bpf_map_def SEC("maps") shared_stats = {
     .type = BPF_MAP_TYPE_PERCPU_ARRAY,
@@ -161,6 +163,9 @@ NOINLINE int ingress_ipv4(
     __builtin_memcpy(scratch->original.original_addr, &ip->destination, 4U);
     __u8 dns_policy = shared_dns_policy(
         ip->protocol, source_port, destination_port, control);
+    if (!dhcp_packet(scratch->original.protocol, source_port, destination_port) &&
+        !sb_ebpf_ipv4_safety_bypass(scratch->original.original_addr) &&
+        shared_force_v4(scratch->original.original_addr)) dns_policy = SB_SHARED_POLICY_PROXY;
     if (dns_policy == SB_SHARED_POLICY_BYPASS) {
         return SB_SHARED_ACT_CONTINUE;
     }
@@ -405,6 +410,9 @@ NOINLINE int ingress_ipv6(
     __builtin_memcpy(scratch->original.original_addr, ip->destination, 16U);
     __u8 dns_policy = shared_dns_policy(
         protocol, source_port, destination_port, control);
+    if (!dhcp_packet(scratch->original.protocol, source_port, destination_port) &&
+        !sb_ebpf_ipv6_safety_bypass(scratch->original.original_addr) &&
+        shared_force_v6(scratch->original.original_addr)) dns_policy = SB_SHARED_POLICY_PROXY;
     if (dns_policy == SB_SHARED_POLICY_BYPASS) {
         return SB_SHARED_ACT_CONTINUE;
     }

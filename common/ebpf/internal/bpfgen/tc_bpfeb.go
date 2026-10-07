@@ -30,10 +30,15 @@ const (
 	TCMapTcIncludeSourceMac                    = "tc_include_source_mac"
 	TCMapTcListenerSockets                     = "tc_listener_sockets"
 	TCMapTcLocalBypassPort                     = "tc_local_bypass_port"
+	TCMapTcLocalForceIpv4                      = "tc_local_force_ipv4"
+	TCMapTcLocalForceIpv6                      = "tc_local_force_ipv6"
+	TCMapTcRetiredAssignment                   = "tc_retired_assignment"
 	TCMapTcSelfSockets                         = "tc_self_sockets"
 	TCMapTcSharedBypassIpv4                    = "tc_shared_bypass_ipv4"
 	TCMapTcSharedBypassIpv6                    = "tc_shared_bypass_ipv6"
 	TCMapTcSharedBypassPort                    = "tc_shared_bypass_port"
+	TCMapTcSharedForceIpv4                     = "tc_shared_force_ipv4"
+	TCMapTcSharedForceIpv6                     = "tc_shared_force_ipv6"
 	TCMapTcStats                               = "tc_stats"
 	TCMapTcUidPolicy                           = "tc_uid_policy"
 	TCProgSingboxTcDeliveryIngress             = "singbox_tc_delivery_ingress"
@@ -126,10 +131,15 @@ type TCMapSpecs struct {
 	TcIncludeSourceMac  *ebpf.MapSpec `ebpf:"tc_include_source_mac"`
 	TcListenerSockets   *ebpf.MapSpec `ebpf:"tc_listener_sockets"`
 	TcLocalBypassPort   *ebpf.MapSpec `ebpf:"tc_local_bypass_port"`
+	TcLocalForceIpv4    *ebpf.MapSpec `ebpf:"tc_local_force_ipv4"`
+	TcLocalForceIpv6    *ebpf.MapSpec `ebpf:"tc_local_force_ipv6"`
+	TcRetiredAssignment *ebpf.MapSpec `ebpf:"tc_retired_assignment"`
 	TcSelfSockets       *ebpf.MapSpec `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.MapSpec `ebpf:"tc_shared_bypass_ipv6"`
 	TcSharedBypassPort  *ebpf.MapSpec `ebpf:"tc_shared_bypass_port"`
+	TcSharedForceIpv4   *ebpf.MapSpec `ebpf:"tc_shared_force_ipv4"`
+	TcSharedForceIpv6   *ebpf.MapSpec `ebpf:"tc_shared_force_ipv6"`
 	TcStats             *ebpf.MapSpec `ebpf:"tc_stats"`
 	TcUidPolicy         *ebpf.MapSpec `ebpf:"tc_uid_policy"`
 }
@@ -174,10 +184,15 @@ type TCMaps struct {
 	TcIncludeSourceMac  *ebpf.Map `ebpf:"tc_include_source_mac"`
 	TcListenerSockets   *ebpf.Map `ebpf:"tc_listener_sockets"`
 	TcLocalBypassPort   *ebpf.Map `ebpf:"tc_local_bypass_port"`
+	TcLocalForceIpv4    *ebpf.Map `ebpf:"tc_local_force_ipv4"`
+	TcLocalForceIpv6    *ebpf.Map `ebpf:"tc_local_force_ipv6"`
+	TcRetiredAssignment *ebpf.Map `ebpf:"tc_retired_assignment"`
 	TcSelfSockets       *ebpf.Map `ebpf:"tc_self_sockets"`
 	TcSharedBypassIpv4  *ebpf.Map `ebpf:"tc_shared_bypass_ipv4"`
 	TcSharedBypassIpv6  *ebpf.Map `ebpf:"tc_shared_bypass_ipv6"`
 	TcSharedBypassPort  *ebpf.Map `ebpf:"tc_shared_bypass_port"`
+	TcSharedForceIpv4   *ebpf.Map `ebpf:"tc_shared_force_ipv4"`
+	TcSharedForceIpv6   *ebpf.Map `ebpf:"tc_shared_force_ipv6"`
 	TcStats             *ebpf.Map `ebpf:"tc_stats"`
 	TcUidPolicy         *ebpf.Map `ebpf:"tc_uid_policy"`
 }
@@ -198,10 +213,15 @@ func (m *TCMaps) Close() error {
 		m.TcIncludeSourceMac,
 		m.TcListenerSockets,
 		m.TcLocalBypassPort,
+		m.TcLocalForceIpv4,
+		m.TcLocalForceIpv6,
+		m.TcRetiredAssignment,
 		m.TcSelfSockets,
 		m.TcSharedBypassIpv4,
 		m.TcSharedBypassIpv6,
 		m.TcSharedBypassPort,
+		m.TcSharedForceIpv4,
+		m.TcSharedForceIpv6,
 		m.TcStats,
 		m.TcUidPolicy,
 	)

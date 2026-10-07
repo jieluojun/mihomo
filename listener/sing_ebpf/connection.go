@@ -211,6 +211,7 @@ func (i *Inbound) newTCPacket(backend *ECommon.TCBackend, data []byte, destinati
 	if !bound {
 		assignment, err := backend.LookupAssignment(ECommon.ProtocolUDP, client, destination, interfaceIndex, false)
 		if err != nil && interfaceIndex != 0 {
+			interfaceIndex = 0
 			assignment, err = backend.LookupAssignment(ECommon.ProtocolUDP, client, destination, 0, false)
 		}
 		if err != nil {
@@ -223,7 +224,9 @@ func (i *Inbound) newTCPacket(backend *ECommon.TCBackend, data []byte, destinati
 		if sharedPath && assignment.SourceMACValid != 0 {
 			sourceMAC = net.HardwareAddr(assignment.SourceMAC[:])
 		}
-		i.udpClientTable.setDirectBinding(client, destination, sourceMAC, assignment.SocketCookie, sharedPath)
+		i.udpClientTable.setDirectBinding(client, destination, sourceMAC, assignment.SocketCookie, sharedPath, func() {
+			_ = backend.DeleteUDPAssignment(client, destination, interfaceIndex, assignment)
+		})
 	}
 	if i.hijackTCDNS(destination, sharedPath) {
 		clientState := i.udpClientTable.loadOrCreate(client)

@@ -89,6 +89,7 @@ const (
 	datapathStatSharedRewriteFailure
 	datapathStatTCFakeIPICMPRewriteFailure
 	datapathStatSharedFakeIPICMPRewriteFailure
+	datapathStatCgroupUDPReleaseDrops
 	datapathStatCount
 )
 
@@ -103,12 +104,14 @@ type datapathStatDescriptor struct {
 	heavy uint64
 }
 
-// datapathStatDescriptors is indexed by datapathStat. Every row describes a
-// packet that was dropped or that escaped this data plane unproxied, so info is
-// the floor: none of them is a routine outcome. heavy stays available for a row
+// datapathStatDescriptors is indexed by datapathStat. Rows describe traffic
+// loss or degraded cleanup, so info is the floor. heavy stays available for a row
 // that repeats per packet on a static misconfiguration, which must not be able
 // to raise a warning every interval forever.
 var datapathStatDescriptors = [datapathStatCount]datapathStatDescriptor{
+	datapathStatCgroupUDPReleaseDrops: {
+		name: "cgroup_udp_release_drops", level: datapathReportInfo, heavy: datapathHeavySustainedDelta,
+	},
 	datapathStatTCListenerSocketMissing: {
 		name: "tc_listener_socket_missing", level: datapathReportInfo, heavy: datapathHeavySustainedDelta,
 	},
@@ -272,6 +275,11 @@ type inboundDatapathStatSource struct {
 
 func (s inboundDatapathStatSource) readDatapathStats() []datapathStatReading {
 	readings := make([]datapathStatReading, 0, datapathStatCount)
+	if backend := s.inbound.cgroupBackendInstance(); backend != nil {
+		if drops, err := backend.UDPReleaseNotificationDrops(); err == nil {
+			readings = append(readings, datapathStatReading{datapathStatCgroupUDPReleaseDrops, drops})
+		}
+	}
 	if backend := s.inbound.tcBackend(); backend != nil {
 		if stats, err := backend.TCStats(); err == nil {
 			readings = append(readings, tcDatapathStatReadings(stats)...)
@@ -335,7 +343,7 @@ func appendFakeIPICMPReading(
 // janitor's.
 func (i *Inbound) startDatapathReporter() {
 	if !i.hasDatapathStatSource() {
-		// Nothing to read: the cgroup data plane keeps none of these counters.
+		// Nothing to read until a data plane has been prepared.
 		return
 	}
 	i.startDatapathReportLoop(inboundDatapathStatSource{inbound: i}, datapathReportInterval)
@@ -394,9 +402,8 @@ func tcDatapathStatReadings(stats ECommon.TCStats) []datapathStatReading {
 	}
 }
 
-// hasDatapathStatSource reports whether anything this inbound runs keeps the
-// counters the report reads. A cgroup-only inbound has none, and starting a
-// goroutine to poll nothing every interval is pure overhead.
+// hasDatapathStatSource includes cgroup release-event drops as well as TC and
+// rewrite failures. A backend without the optional event map omits that reading.
 func (i *Inbound) hasDatapathStatSource() bool {
-	return i.tcBackend() != nil || i.sharedRewrite != nil
+	return i.tcBackend() != nil || i.sharedRewrite != nil || i.cgroupBackendInstance() != nil
 }

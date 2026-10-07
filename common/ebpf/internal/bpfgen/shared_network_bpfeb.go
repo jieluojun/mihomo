@@ -32,6 +32,8 @@ const (
 	SharedNetworkMapSharedIncludeSourceIpv6 = "shared_include_source_ipv6"
 	SharedNetworkMapSharedIncludeSourceMac  = "shared_include_source_mac"
 	SharedNetworkMapSharedScratch           = "shared_scratch"
+	SharedNetworkMapSharedSharedForceIpv4   = "shared_shared_force_ipv4"
+	SharedNetworkMapSharedSharedForceIpv6   = "shared_shared_force_ipv6"
 	SharedNetworkMapSharedStats             = "shared_stats"
 	SharedNetworkProgSingboxSharedEgress    = "singbox_shared_egress"
 	SharedNetworkProgSingboxSharedIngress   = "singbox_shared_ingress"
@@ -103,6 +105,8 @@ type SharedNetworkMapSpecs struct {
 	SharedIncludeSourceIpv6 *ebpf.MapSpec `ebpf:"shared_include_source_ipv6"`
 	SharedIncludeSourceMac  *ebpf.MapSpec `ebpf:"shared_include_source_mac"`
 	SharedScratch           *ebpf.MapSpec `ebpf:"shared_scratch"`
+	SharedSharedForceIpv4   *ebpf.MapSpec `ebpf:"shared_shared_force_ipv4"`
+	SharedSharedForceIpv6   *ebpf.MapSpec `ebpf:"shared_shared_force_ipv6"`
 	SharedStats             *ebpf.MapSpec `ebpf:"shared_stats"`
 }
 
@@ -148,6 +152,8 @@ type SharedNetworkMaps struct {
 	SharedIncludeSourceIpv6 *ebpf.Map `ebpf:"shared_include_source_ipv6"`
 	SharedIncludeSourceMac  *ebpf.Map `ebpf:"shared_include_source_mac"`
 	SharedScratch           *ebpf.Map `ebpf:"shared_scratch"`
+	SharedSharedForceIpv4   *ebpf.Map `ebpf:"shared_shared_force_ipv4"`
+	SharedSharedForceIpv6   *ebpf.Map `ebpf:"shared_shared_force_ipv6"`
 	SharedStats             *ebpf.Map `ebpf:"shared_stats"`
 }
 
@@ -169,6 +175,8 @@ func (m *SharedNetworkMaps) Close() error {
 		m.SharedIncludeSourceIpv6,
 		m.SharedIncludeSourceMac,
 		m.SharedScratch,
+		m.SharedSharedForceIpv4,
+		m.SharedSharedForceIpv6,
 		m.SharedStats,
 	)
 }

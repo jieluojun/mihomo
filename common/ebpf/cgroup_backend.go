@@ -15,6 +15,7 @@ import (
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/features"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,6 +53,8 @@ var cgroupProgramDefinitions = [cgroupProgramCount]cgroupProgramDefinition{
 }
 
 type cgroupRuntime struct {
+	udpReleaseReader            *ringbuf.Reader
+	udpReleaseFallback          string
 	cgroupFile                  *os.File
 	maps                        map[string]*CiliumEBPF.Map
 	programs                    []*CiliumEBPF.Program
@@ -87,41 +90,40 @@ type cgroupRuntime struct {
 }
 
 type CgroupBackend struct {
-	access                         sync.RWMutex
-	health                         backendHealth
-	udpRecoveryAccess              sync.Mutex
-	udpReplyTokenSequence          atomic.Uint64
-	connectedUDPTokenLookupSupport mapBatchSupport
-	connectedUDPTokenKeys          []uint64
-	connectedUDPTokenValues        []listenerLookupKey
-	lookupAndDeleteMode            atomic.Int32
-	udpRecoveryConsumeMode         atomic.Int32
-	runtime                        *cgroupRuntime
-	mapCapacity                    CgroupMapCapacity
-	tcpRedirectMapFD               int
-	udpRedirectMapFD               int
-	udpRecoveryMapFD               int
-	udpFlowMapFD                   int
-	socketBypassMapFD              int
-	bypassIPv4CIDRMapFD            int
-	bypassIPv6CIDRMapFD            int
-	hostIPv4MapFD                  int
-	hostIPv6MapFD                  int
-	bypassIPv4CIDR                 []netip.Prefix
-	bypassIPv6CIDR                 []netip.Prefix
-	hostIPv4                       []netip.Prefix
-	hostIPv6                       []netip.Prefix
-	cgroupPath                     string
-	redirectIPv4                   netip.Prefix
-	redirectIPv6                   netip.Prefix
-	fakeIPIPv4                     netip.Prefix
-	fakeIPIPv6                     netip.Prefix
-	enableIPv6                     bool
-	enableUDP                      bool
-	dnsMode                        DNSMode
-	bypassPrivateAddress           bool
-	udpTimeoutSeconds              uint32
-	listenerPort                   uint16
+	access                sync.RWMutex
+	health                backendHealth
+	udpReleaseReadAccess  sync.Mutex
+	udpReleaseQueueDrops  atomic.Uint64
+	recoverySweepScratch  mapScanScratch[UDPReleaseEvent, originalDestinationValue]
+	udpRecoveryAccess     sync.Mutex
+	udpReplyTokenSequence atomic.Uint64
+	lookupAndDeleteMode   atomic.Int32
+	runtime               *cgroupRuntime
+	mapCapacity           CgroupMapCapacity
+	tcpRedirectMapFD      int
+	udpRedirectMapFD      int
+	udpRecoveryMapFD      int
+	udpFlowMapFD          int
+	socketBypassMapFD     int
+	bypassIPv4CIDRMapFD   int
+	bypassIPv6CIDRMapFD   int
+	hostIPv4MapFD         int
+	hostIPv6MapFD         int
+	bypassIPv4CIDR        []netip.Prefix
+	bypassIPv6CIDR        []netip.Prefix
+	hostIPv4              []netip.Prefix
+	hostIPv6              []netip.Prefix
+	cgroupPath            string
+	redirectIPv4          netip.Prefix
+	redirectIPv6          netip.Prefix
+	fakeIPIPv4            netip.Prefix
+	fakeIPIPv6            netip.Prefix
+	enableIPv6            bool
+	enableUDP             bool
+	dnsMode               DNSMode
+	bypassPrivateAddress  bool
+	udpTimeoutSeconds     uint32
+	listenerPort          uint16
 }
 
 func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
@@ -224,6 +226,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		coarse_time_supported:    coarseTimeSupported,
 	}
 	if err = prepareCgroupMaps(runtimeState, mapCapacity, len(uidPolicyEntries), config.SelfBypassMap); err != nil {
+		if runtimeState.udpReleaseReader != nil {
+			_ = runtimeState.udpReleaseReader.Close()
+		}
 		_ = closeMaps(runtimeState.maps)
 		_ = runtimeState.cgroupFile.Close()
 		if memlockErr != nil && (errors.Is(err, unix.ENOMEM) || errors.Is(err, unix.EPERM)) {
@@ -255,9 +260,11 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
 		udpTimeoutSeconds:    udpTimeoutSeconds,
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
-		Scope:     "cgroup eBPF",
-		UID:       runtimeState.maps["cgroup_uid_policy"],
-		LocalPort: runtimeState.maps["cgroup_bypass_port"],
+		LocalForceIPv6: runtimeState.maps["cgroup_local_force_ipv6"],
+		LocalForceIPv4: runtimeState.maps["cgroup_local_force_ipv4"],
+		Scope:          "cgroup eBPF",
+		UID:            runtimeState.maps["cgroup_uid_policy"],
+		LocalPort:      runtimeState.maps["cgroup_bypass_port"],
 	}, policy); err != nil {
 		_ = backend.Close()
 		return nil, err

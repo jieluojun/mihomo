@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"errors"
+	"net/netip"
 	"reflect"
 	"slices"
 	"testing"
@@ -149,6 +150,10 @@ func TestEBPFUpdateRefusesWhatItCannotApply(t *testing.T) {
 		{name: "fakeip-icmp", mutate: func(o *EBPFOption) { o.FakeIPICMP = "off" }},
 		{name: "local section", mutate: func(o *EBPFOption) { o.Local.CgroupPath = "/elsewhere" }},
 		{name: "shared section", mutate: func(o *EBPFOption) { o.Shared.Interface = []string{"wlan0"} }},
+		{name: "local bypass-exclude", mutate: func(o *EBPFOption) { o.Local.BypassExclude = []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10")} }},
+		{name: "shared bypass-exclude", mutate: func(o *EBPFOption) {
+			o.Shared.BypassExclude = []netip.Prefix{netip.MustParsePrefix("fd7a:115c:a1e0::/48")}
+		}},
 		{name: "base option", mutate: func(o *EBPFOption) { o.SpecialProxy = "REJECT" }},
 		{name: "an updatable field alongside one that is not", mutate: func(o *EBPFOption) {
 			o.UDPTimeout = 600

@@ -349,7 +349,7 @@ func (i *Inbound) refreshSplitBypassCIDRsLocked() error {
 func (i *Inbound) commitBypassPolicyLocked(local, shared, union ECommon.BypassCIDRPolicy) {
 	i.bypassRuleSetPolicy = local
 	i.sharedBypassRuleSetPolicy = shared
-	i.bypassCIDR = union.Prefixes()
+	i.bypassCIDR = i.excludeForcedPrefixes(union.Prefixes())
 	// Recompute the set the DNS fake-ip middleware consults, so domains whose
 	// real addresses fall inside it keep their real IP and the kernel eBPF
 	// bypass can engage. Only bypass_rule_set feeds it; publishing the private

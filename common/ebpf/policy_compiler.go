@@ -10,6 +10,8 @@ import (
 )
 
 type PolicyConfig struct {
+	LocalBypassExclude  []netip.Prefix
+	SharedBypassExclude []netip.Prefix
 	EnableTCP           bool
 	EnableUDP           bool
 	Local               LocalPolicy
@@ -28,6 +30,8 @@ type PolicyConfig struct {
 // CompiledPolicy is an immutable policy snapshot shared by all eBPF data
 // planes created for one inbound.
 type CompiledPolicy struct {
+	localBypassExclude      dualStackCIDRPrefixes
+	sharedBypassExclude     dualStackCIDRPrefixes
 	local                   LocalPolicy
 	uidEntries              []uidLPMKey
 	uidDefaultBypass        bool
@@ -80,10 +84,20 @@ func CompilePolicy(config PolicyConfig) (CompiledPolicy, error) {
 	if err != nil {
 		return CompiledPolicy{}, E.Cause(err, "compile shared eBPF port bypass policy")
 	}
+	localForce, err := compileBypassExclude(config.LocalBypassExclude)
+	if err != nil {
+		return CompiledPolicy{}, E.Cause(err, "local bypass-exclude")
+	}
+	sharedForce, err := compileBypassExclude(config.SharedBypassExclude)
+	if err != nil {
+		return CompiledPolicy{}, E.Cause(err, "shared bypass-exclude")
+	}
 	local := config.Local
 	local.IncludeUID = slices.Clone(local.IncludeUID)
 	local.ExcludeUID = slices.Clone(local.ExcludeUID)
 	return CompiledPolicy{
+		localBypassExclude:      localForce,
+		sharedBypassExclude:     sharedForce,
 		local:                   local,
 		uidEntries:              uidEntries,
 		uidDefaultBypass:        uidDefaultBypass,

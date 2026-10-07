@@ -241,8 +241,10 @@ func PrepareSharedNetwork(cgroupBackend *CgroupBackend, config SharedNetworkConf
 		return nil, err
 	}
 	if err = populateCompiledPolicyMaps(policyMapTargets{
-		Scope:      "shared packet-rewrite",
-		SharedPort: backend.runtime.maps["shared_bypass_port"],
+		SharedForceIPv6: backend.runtime.maps["shared_shared_force_ipv6"],
+		SharedForceIPv4: backend.runtime.maps["shared_shared_force_ipv4"],
+		Scope:           "shared packet-rewrite",
+		SharedPort:      backend.runtime.maps["shared_bypass_port"],
 	}, policy); err != nil {
 		_ = backend.Close()
 		return nil, err
@@ -273,6 +275,8 @@ func prepareSharedNetworkRuntime(
 ) error {
 	var err error
 	runtimeState.maps, err = loadObjectMaps(loadSharedNetwork, map[string]mapSpecOverride{
+		"shared_shared_force_ipv4":   {name: "sb_sh_sforce4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
+		"shared_shared_force_ipv6":   {name: "sb_sh_sforce6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxBypassExcludeEntries, flags: bpfFlagNoPrealloc},
 		"shared_control":             {name: "sb_sh_control", mapType: CiliumEBPF.Array, maxEntries: 1},
 		"shared_stats":               {name: "sb_sh_stats", mapType: CiliumEBPF.PerCPUArray, maxEntries: sharedNetworkStatCount},
 		"shared_flow_by_original":    {name: "sb_sh_orig", mapType: CiliumEBPF.Hash, maxEntries: capacity.Proxy, flags: bpfFlagNoPrealloc},

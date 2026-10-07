@@ -408,8 +408,7 @@ func TestDatapathReporterStopsOnClose(t *testing.T) {
 	i.stopDatapathReporter()
 }
 
-// TestDatapathReporterSkippedWithoutAStatSource pins the gate: a cgroup-only
-// inbound keeps none of these counters, so it must not pay for a goroutine.
+// An inbound with no prepared data plane must not pay for a report goroutine.
 func TestDatapathReporterSkippedWithoutAStatSource(t *testing.T) {
 	i := &Inbound{}
 	i.startDatapathReporter()
@@ -439,6 +438,7 @@ func TestDatapathReporterGateFollowsTheSourcesItWouldRead(t *testing.T) {
 			i.tcDataPlane = &tcDataPlane{backend: &ECommon.TCBackend{}}
 		}, want: true},
 		{name: "shared rewrite only", build: func(i *Inbound) { i.sharedRewrite = &sharedRewrite{} }, want: true},
+		{name: "cgroup only", build: func(i *Inbound) { i.cgroupBackend = &ECommon.CgroupBackend{} }, want: true},
 		{name: "both", build: func(i *Inbound) {
 			i.tcDataPlane = &tcDataPlane{backend: &ECommon.TCBackend{}}
 			i.sharedRewrite = &sharedRewrite{}

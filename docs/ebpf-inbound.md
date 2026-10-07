@@ -100,6 +100,7 @@ listeners:
       ipv6: true
       bypass-private-address: true
       bypass-rule-set: []     # bypassed by the local role only, on top of the list above
+      bypass-exclude: []      # CIDRs forced through interception, e.g. [100.64.0.0/10]
       include-uid: []
       include-uid-range: []   # "start:end"
       exclude-uid: []
@@ -116,6 +117,7 @@ listeners:
       ipv6: true
       bypass-private-address: true
       bypass-rule-set: []     # bypassed by the shared role only, on top of the list above
+      bypass-exclude: []      # independent of local exclusions and DNS fake-IP ranges
       include-source-cidr: []
       exclude-source-cidr: []
       include-mac-address: []
@@ -153,6 +155,18 @@ Field behavior:
 - `tc-priority`: priority of the TC filters. With the default `1` the inbound
   attaches through TCX on kernels that support it and falls back to clsact
   filters otherwise; any other value always uses clsact filters.
+- `local.bypass-exclude` / `shared.bypass-exclude`: destination CIDRs that force
+  interception ahead of configurable DNS, UID/source, port, private-address
+  and rule-set bypasses. The feature does not choose an outbound; normal mihomo
+  rules still decide where intercepted traffic goes. Protocol/address-family
+  enablement, self-socket and mandatory safety guards still apply. Each enabled
+  role has independent IPv4/IPv6 LPM tables (up to 4096 normalized entries per
+  family), so multiple CIDRs and DNS fake-IP ranges can coexist. IPv4-mapped
+  IPv6 prefixes at `/96` or longer are normalized to IPv4. Disabled scopes
+  ignore this option. Changing the list rebuilds the inbound; fake-IP range
+  updates continue to apply in place. Exclusions from either enabled role are
+  removed from this inbound's global DNS/TUN bypass publication to avoid sending
+  forced destinations directly when traffic crosses TUN.
 - `bypass-rule-set`: rule provider tags whose CIDRs populate the bypass LPM
   maps. Only `behavior: ipcidr` providers contribute; others are skipped. The
   top-level list is bypassed by every role. `local.bypass-rule-set` and
@@ -497,3 +511,19 @@ range is configured and at least one attachment can carry them --
 `local.data-plane: tc`, or shared interception under either `shared.data-plane`.
 In particular `local.data-plane: cgroup` with no shared interception cannot:
 its `connect()`/`sendmsg()` hooks never see ICMP.
+
+### UDP recovery lifecycle
+
+Connected UDP recovery uses a reverse token index instead of scanning socket
+cookies. Optional socket-release ring-buffer events schedule recovery expiry;
+unsupported maps/helpers or notification overflow retain the bounded deadline
+sweeper. Both paths follow the current `udp-timeout`. Recovery payloads are keyed
+by socket cookie and monotonic release time, so delayed cleanup cannot delete a
+new record under a reused token. Token indexes remain bounded LRUs.
+
+TC UDP cleanup marks the observed assignment generation retired. A later packet
+rebuilds its metadata; cleanup never compare/deletes a concurrently replaced
+assignment. Assignment and retirement storage remain bounded LRUs. Startup logs
+show the actual UDP release/cleanup path and fallback reason, and the existing
+30-second datapath report includes `cgroup_udp_release_drops` for kernel-ring or
+userspace-queue overflow.
