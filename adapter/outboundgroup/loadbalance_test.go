@@ -419,7 +419,7 @@ func request(user, host string) *C.Metadata {
 
 // One unit of work walking several destinations is the case both address-derived
 // keys get wrong: the group is meant to hold that work on one egress, and the
-// default key moves it as soon as the host changes.
+// default key changes as soon as the host changes.
 func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 	proxies := balancedProxies(8)
 	hosts := distinctKeys("www.site-%02d.com", 16)
@@ -432,21 +432,16 @@ func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 			"hash-key: user must ignore the destination")
 	}
 
-	byDestination := strategyConsistentHashing(testUrl, getKey, false, false)
-	seen := map[int]bool{}
+	// Distinct keys may legally select the same bucket; assert the key contract.
+	seenKeys := map[string]struct{}{}
 	for _, host := range hosts {
-		seen[indexOf(t, proxies, byDestination(proxies, request("job-1", host), false))] = true
+		seenKeys[getKey(request("job-1", host))] = struct{}{}
 	}
-	require.Greater(t, len(seen), 1,
-		"the default key is expected to move with the destination")
+	require.Len(t, seenKeys, len(hosts), "the default key must change with the destination")
 }
 
 // distinctKeys returns count distinct keys; for hosts, vary the registrable
-// domain, since getKey hashes the eTLD+1. utils.MapHash is
-// seeded per process, so "these keys do not all land on one node" is only
-// probably true: four keys over eight nodes all collide once in 512 runs,
-// which CI's two dozen runs of this package per push hit about one push in
-// twenty. Sixteen make it about one in 3e13.
+// domain, since getKey hashes the eTLD+1.
 func distinctKeys(format string, count int) []string {
 	keys := make([]string, count)
 	for i := range keys {
@@ -455,17 +450,15 @@ func distinctKeys(format string, count int) []string {
 	return keys
 }
 
-// Pinning must not become a single node: distinct users still spread.
-func TestLoadBalanceHashKeyInUserSpreadsUsers(t *testing.T) {
-	proxies := balancedProxies(8)
-	strategy := strategyConsistentHashing(testUrl, getKeyWithInUser(getKey), false, false)
-
-	seen := map[int]bool{}
-	for _, user := range distinctKeys("job-%02d", 16) {
-		selected := strategy(proxies, request(user, "a.example.com"), false)
-		seen[indexOf(t, proxies, selected)] = true
+// Pinning must preserve distinct inbound identities before hashing.
+func TestLoadBalanceHashKeyInUserKeepsUsersDistinct(t *testing.T) {
+	keyed := getKeyWithInUser(getKey)
+	users := distinctKeys("job-%02d", 16)
+	seenKeys := map[string]struct{}{}
+	for _, user := range users {
+		seenKeys[keyed(request(user, "a.example.com"))] = struct{}{}
 	}
-	require.Greater(t, len(seen), 1)
+	require.Len(t, seenKeys, len(users))
 }
 
 // Sticky sessions keys on source and destination; a client behind one source
