@@ -342,7 +342,7 @@ CGO_ENABLED=0 GOARCH=amd64 \
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) — 上游项目本体及 [官方文档](https://wiki.metacubex.one/)
 - [vernesong/mihomo](https://github.com/vernesong/mihomo) — smart 策略组与模型选择机制
 - [TanakaLun/mihomo](https://github.com/TanakaLun/mihomo/tree/ebpf-inbound) — eBPF 透明入站适配层
-- [CHIZI-0618/sing-ebpf](https://github.com/CHIZI-0618/sing-ebpf) — eBPF TC + cgroup 后端后续开发
+- [CHIZI-0618/sing-ebpf](https://github.com/CHIZI-0618/sing-ebpf) — eBPF TC + cgroup 后端后续开发；本分支保留内置后端
 - [Dreamacro/clash](https://github.com/Dreamacro/clash) 与 [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
 
 
