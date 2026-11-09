@@ -343,10 +343,10 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
+      # fork 没有 Meta 分支：从所选 ref（默认 Alpha）发布
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: Meta
           fetch-depth: '0'
           fetch-tags: 'true'
 
@@ -355,15 +355,6 @@ jobs:
           echo "CURRENTVERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
           git fetch --tags
           echo "PREVERSION=$(git describe --tags --abbrev=0 HEAD)" >> $GITHUB_ENV
-
-      - name: Force push Alpha branch to Meta
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          git fetch origin Alpha:Alpha
-          git push origin Alpha:Meta --force
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag the commit on Alpha
         run: |
