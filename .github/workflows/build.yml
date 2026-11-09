@@ -1,11 +1,13 @@
 name: Build
 on:
+  # 日常分支推送只跑 Build Android ARM64；全平台构建仅打 v* 标签或手动触发时运行。
+  # 手动触发不填 version：与上游推送 Alpha 一致，构建并更新 Prerelease-Alpha 滚动预发布版；
+  # 填写 version：走完整发布流程（force-push Alpha→Meta、打新标签、创建 Release）。
   workflow_dispatch:
     inputs:
       version:
-        description: "Tag version to release"
-        required: true
-  # 全平台构建仅在打 v* 标签或手动触发时运行；日常分支推送只跑 Build Android ARM64。
+        description: "Tag version to release（留空则更新 Prerelease-Alpha 滚动预发布版，与上游推送 Alpha 一致）"
+        required: false
   push:
     tags:
       - "v*"
@@ -272,7 +274,7 @@ jobs:
 
   Upload-Prerelease:
     permissions: write-all
-    if: ${{ github.event_name != 'workflow_dispatch' && github.ref_type == 'branch' && !startsWith(github.event_name, 'pull_request') }}
+    if: ${{ github.ref_type == 'branch' && github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.version != '') }}
     needs: [build]
     runs-on: ubuntu-latest
     steps:
@@ -425,7 +427,7 @@ jobs:
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
       - name: Extract Docker metadata
-        if: ${{ github.event_name != 'workflow_dispatch' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.version == '' }}
         id: meta_alpha
         uses: docker/metadata-action@v6
         with:
@@ -460,7 +462,7 @@ jobs:
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
       - name: Build and push Docker image
-        if: ${{ github.event_name != 'workflow_dispatch' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.version == '' }}
         uses: docker/build-push-action@v7
         with:
           context: .
