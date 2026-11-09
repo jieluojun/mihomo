@@ -1,0 +1,80 @@
+From c582bd64b5d47a0f16900e3d2f28b503b6681d66 Mon Sep 17 00:00:00 2001
+From: with-at-porter <with-at@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 12:51:22 +0000
+Subject: [PATCH 2/5] feat(features): show with_ebpf tag; normalize Version suffix
+ to -zero
+
+Mishka and other clients overwrite constant.Version with -ldflags -X at
+link time, so changing only the Actions VERSION string does not affect
+APK builds. Trim a trailing -with-at and ensure -zero after that inject.
+---
+ constant/features/tags.go           |  3 +++
+ constant/features/with_ebpf.go      |  5 +++++
+ constant/features/with_ebpf_stub.go |  5 +++++
+ constant/version.go                 | 11 +++++++++++
+ 4 files changed, 24 insertions(+)
+ create mode 100644 constant/features/with_ebpf.go
+ create mode 100644 constant/features/with_ebpf_stub.go
+
+diff --git a/constant/features/tags.go b/constant/features/tags.go
+index bf27c24..3af7086 100644
+--- a/constant/features/tags.go
++++ b/constant/features/tags.go
+@@ -22,5 +22,8 @@ func Tags() (tags []string) {
+ 	if WithGVisor {
+ 		tags = append(tags, "with_gvisor")
+ 	}
++	if WithEBPF {
++		tags = append(tags, "with_ebpf")
++	}
+ 	return
+ }
+diff --git a/constant/features/with_ebpf.go b/constant/features/with_ebpf.go
+new file mode 100644
+index 0000000..563e26c
+--- /dev/null
++++ b/constant/features/with_ebpf.go
+@@ -0,0 +1,5 @@
++//go:build with_ebpf
++
++package features
++
++const WithEBPF = true
+diff --git a/constant/features/with_ebpf_stub.go b/constant/features/with_ebpf_stub.go
+new file mode 100644
+index 0000000..a3bc838
+--- /dev/null
++++ b/constant/features/with_ebpf_stub.go
+@@ -0,0 +1,5 @@
++//go:build !with_ebpf
++
++package features
++
++const WithEBPF = false
+diff --git a/constant/version.go b/constant/version.go
+index c71024c..2478bb4 100644
+--- a/constant/version.go
++++ b/constant/version.go
+@@ -1,8 +1,19 @@
+ package constant
+ 
++import "strings"
++
+ var (
+ 	Meta       = true
+ 	Version    = "1.10.0"
+ 	BuildTime  = "unknown time"
+ 	MihomoName = "mihomo"
+ )
++
++func init() {
++	// ldflags -X overwrites Version at link time (Mishka Gradle, this repo's
++	// Actions). Normalize after that so APK/binaries show -zero, not -with-at.
++	Version = strings.TrimSuffix(Version, "-with-at")
++	if !strings.HasSuffix(Version, "-zero") {
++		Version += "-zero"
++	}
++}
+-- 
+2.47.3
+
