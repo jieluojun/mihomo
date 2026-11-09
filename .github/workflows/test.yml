@@ -1,17 +1,10 @@
 name: Test
 on:
+  # 日常分支推送只跑 Build Android ARM64；完整测试仅在打 v* 标签或手动触发时运行。
   push:
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
-      - ".github/ISSUE_TEMPLATE/**"
-    branches:
-      - Alpha
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - Alpha
+  workflow_dispatch:
 
 jobs:
   test:

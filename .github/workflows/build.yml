@@ -5,18 +5,10 @@ on:
       version:
         description: "Tag version to release"
         required: true
+  # 全平台构建仅在打 v* 标签或手动触发时运行；日常分支推送只跑 Build Android ARM64。
   push:
-    paths-ignore:
-      - "docs/**"
-      - "README.md"
-      - ".github/ISSUE_TEMPLATE/**"
-    branches:
-      - Alpha
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - Alpha
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
