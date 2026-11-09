@@ -14,20 +14,7 @@ name: eBPF
 # build.yml, which already builds linux and android with with_ebpf.
 
 on:
-  push:
-    branches:
-      - Alpha
-    paths:
-      - "common/ebpf/**"
-      - "listener/sing_ebpf/**"
-      - ".github/workflows/ebpf.yml"
-  pull_request:
-    branches:
-      - Alpha
-    paths:
-      - "common/ebpf/**"
-      - "listener/sing_ebpf/**"
-      - ".github/workflows/ebpf.yml"
+  # 日常分支推送只跑 Build Android ARM64；eBPF 内核程序校验仅手动触发。
   workflow_dispatch:
 
 permissions:
