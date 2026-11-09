@@ -111,7 +111,8 @@ jobs:
     - name: Set NDK environment
       run: |
         NDK_PATH=${{ steps.setup-ndk.outputs.ndk-path }}
-        echo "CC=${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
+        echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+        echo "CC=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
         echo "CGO_ENABLED=1" >> $GITHUB_ENV
         echo "GOOS=android" >> $GITHUB_ENV
         echo "GOARCH=arm64" >> $GITHUB_ENV
