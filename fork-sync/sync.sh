@@ -1,16 +1,27 @@
 #!/bin/sh
-# 只保留 Alpha：fetch 上游 → reset 到 upstream/Alpha → 重新 git am 补丁。
+# fork 的 Alpha = upstream/Alpha + fork 自己的提交（线性历史，
+# 用 `git log upstream/Alpha..Alpha` 可以看到）。
+# 同步 = git rebase：把 fork 提交挪到最新上游之上，不再经过补丁文件。
+#
 # 用法（在 mihomo 仓库根目录）:
 #   sh /path/to/fork-sync/sync.sh
-# 补丁和本脚本可以放在仓库外，也可以放在仓库的 fork-sync/：
-# reset 前会先拷到临时目录，所以脚本不会把自己删掉。
+#
+# 冲突时 rebase 会停在当前这个提交上：
+#   git rebase --show-current-patch   # 查看当前冲突对应的改动
+#   # 修好文件后
+#   git add <文件>
+#   git rebase --continue             # 处理下一个提交
+#   git rebase --abort                # 放弃整个同步，回到同步前状态
+#
+# 完成后验证并强推（rebase 重写了历史，需要 --force-with-lease）:
+#   go test ./adapter/outbound/ -run 'TestHttpConnectLine|TestCnsRequestHeader' -v
+#   git push --force-with-lease origin Alpha
 
 set -eu
 
 UPSTREAM="${UPSTREAM:-https://github.com/liuran001/mihomo.git}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-Alpha}"
 ORIGIN_BRANCH="${ORIGIN_BRANCH:-Alpha}"
-PATCH_DIR="${PATCH_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "请在 mihomo 仓库根目录运行" >&2
@@ -20,40 +31,22 @@ fi
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM"
 git fetch upstream "$UPSTREAM_BRANCH"
 
-# reset --hard 会清掉工作区，先把整个补丁目录拷走
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-cp -a "$PATCH_DIR"/. "$tmp/"
-set -- "$tmp"/[0-9][0-9][0-9][0-9]-*.patch
-if [ ! -f "$1" ]; then
-  echo "没有在 $PATCH_DIR 找到 0001-*.patch" >&2
-  exit 1
+git checkout "$ORIGIN_BRANCH"
+
+if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" "$ORIGIN_BRANCH"; then
+  echo "$ORIGIN_BRANCH 已包含 upstream/$UPSTREAM_BRANCH，无需同步"
+  exit 0
 fi
 
-echo "应用补丁:"
-for p in "$@"; do
-  echo "  $(basename "$p")"
-done
+echo "fork 提交（将 rebase 到 upstream/$UPSTREAM_BRANCH 之上）:"
+git log --oneline "upstream/$UPSTREAM_BRANCH..$ORIGIN_BRANCH"
+echo
 
-git checkout -B "$ORIGIN_BRANCH"
-git reset --hard "upstream/$UPSTREAM_BRANCH"
-git am --3way "$@"
-
-# 把 fork-sync（脚本、补丁、README）和工作流放回树上，下次同步还在
-root="$(git rev-parse --show-toplevel)"
-mkdir -p "$root/fork-sync"
-cp -a "$tmp"/. "$root/fork-sync/"
-if [ -f "$tmp/sync-and-build.yml" ]; then
-  mkdir -p "$root/.github/workflows"
-  cp "$tmp/sync-and-build.yml" "$root/.github/workflows/sync-and-build.yml"
-fi
-git add fork-sync
-[ -f "$root/.github/workflows/sync-and-build.yml" ] && git add .github/workflows/sync-and-build.yml
-if ! git diff --cached --quiet; then
-  git add -A fork-sync .github/workflows/sync-and-build.yml 2>/dev/null || true
-  git commit -m "ci: keep sync workflow and patch series on Alpha"
-fi
+git rebase "upstream/$UPSTREAM_BRANCH"
 
 echo
-echo "完成: $ORIGIN_BRANCH = upstream/$UPSTREAM_BRANCH + $# 个补丁"
-echo "推送: git push -f origin $ORIGIN_BRANCH"
+echo "完成: $ORIGIN_BRANCH = upstream/$UPSTREAM_BRANCH + 下列 fork 提交"
+git log --oneline "upstream/$UPSTREAM_BRANCH..$ORIGIN_BRANCH"
+echo
+echo "验证: go test ./adapter/outbound/ -run 'TestHttpConnectLine|TestCnsRequestHeader' -v"
+echo "推送: git push --force-with-lease origin $ORIGIN_BRANCH"
